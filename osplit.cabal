@@ -1,0 +1,68 @@
+name:                osplit
+version:             0.1.0.2
+synopsis:            Bare template implementing a Scotty+Elm+Websocket chat server/client
+-- description:
+homepage:            https://github.com/wuest/osplit
+bug-reports:         https://github.com/wuest/osplit/issues
+license:             BSD3
+license-file:        LICENSE
+author:              Tina Wuest
+maintainer:          tina@wuest.me
+copyright:           2020 Tina Wuest
+category:            Web
+build-type:          Simple
+extra-source-files:  CHANGELOG.md
+cabal-version:       >=1.10
+
+source-repository head
+  type: git
+  location: https://github.com/wuest/osplit.git
+
+executable osplit
+  main-is:          Main.hs
+  ghc-options:      -Wall -fwarn-implicit-prelude -fwarn-monomorphism-restriction -O2 -threaded -static
+  -- -optl-static -optl-pthread -- Omitted by default: produces binaries which do not work cleanly across libc versions
+  other-modules:      Opts
+                    , View
+                    , Const
+                    , Routes
+                    , Websockets
+                    , Message
+                    -- Uncomment as appropriate for database backend/templating support
+                    , Data.Model
+                    , Data.Sqlite
+                    -- LiveSplit Splits files
+                    , Data.LSS
+
+  build-depends:      base                  >= 4.9  && < 4.13
+                    , text                  >= 1.2  && < 1.3
+                    , file-embed            >= 0.0  && < 0.1
+                    , directory             >= 1.3  && < 1.4
+                    , filepath              >= 1.4  && < 1.5
+                    , transformers          >= 0.5  && < 0.6
+                    , mtl                   >= 2.2  && < 2.3
+                    , stm                   >= 2.4  && < 2.6
+                    , wai                   >= 3.2  && < 3.3
+                    , wai-extra             >= 3.0  && < 3.1
+                    , wai-middleware-static >= 0.8  && < 0.9
+                    , wai-websockets        >= 3.0  && < 3.1
+                    , websockets            >= 0.12 && < 0.13
+                    , warp                  >= 3.2  && < 3.4
+                    , scotty                >= 0.11 && < 0.12
+                    , blaze-html            >= 0.9  && < 0.10
+                    , blaze-markup          >= 0.8  && < 0.9
+                    , aeson                 >= 1.4  && < 1.5
+                    , time                  >= 1.8  && < 1.10
+                    , monad-logger          >= 0.3  && < 0.4
+                    , bytestring            >= 0.10 && < 0.11
+                    , hxt                   >= 9.3  && < 9.4
+                    , split                 >= 0.2  && < 0.3
+                    -- Uncomment for database support and Model templating
+                    , persistent            >= 2.10 && < 2.11
+                    , persistent-template   >= 2.7  && < 2.9
+                    -- Uncomment for Sqlite support
+                    , persistent-sqlite     >= 2.10 && < 2.11
+
+
+  hs-source-dirs:   src
+  default-language: Haskell2010

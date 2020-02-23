@@ -1,0 +1,67 @@
+body { font-family: sans-serif; }
+
+/* Menu button */
+div#menu-container    { position: absolute; top: 0px; right: 0px; }
+div.menu-button:hover { text-shadow: 0 0 3px #F00, 0 0 5px #00F; cursor: default; }
+
+/* Contains the full timer */
+div#timer-container { }
+
+/* Game title */
+div#timer-title { font-size: 20px; text-align: center;
+                }
+/* Category name */
+div#timer-category { font-size: 16px; text-align: center;
+                   }
+
+/* Main timer showing the full running time */
+div#main-timer { border-top: 1px solid gray; border-bottom: 1px solid gray;
+                 font-size: 52px; font-weight: bold; letter-spacing: -4px;
+                 text-align: center;
+               }
+
+div#main-timer.neutral        { background: -webkit-linear-gradient(#eee, #333); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer.gaining-ahead  { background: -webkit-linear-gradient(#beb, #030); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer.losing-ahead   { background: -webkit-linear-gradient(#cec, #131); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer.gaining-behind { background: -webkit-linear-gradient(#ecc, #311); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer.losing-behind  { background: -webkit-linear-gradient(#ebb, #300); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+
+/* Contains splits as well as headers */
+div#splits-container  { }
+
+/* Contains headers with column descriptions */
+div#splits-listheader { }
+div.header div        { align-items: center }
+
+/* All row containers will have class 'split' */
+div.split { display: flex; flex-direction: row;
+          }
+
+div.split div { display: flex; flex-direction: column; flex-grow: 1;
+              }
+
+/* Denotes the currently active split */
+div#splits-container div.current { display: flex; flex-direction: row; flex-grow: 1;
+                                 }
+
+/* All individual split segments.  Use this to modify order/display properties/etc. */
+div.split div                 { flex-wrap: nowrap; flex-grow: 0; align-items: flex-end; padding-right: 2px; color: black; -webkit-text-stroke: 0.5px gray; font-size: 20px; font-weight: bold; }
+div.split div.pb              { width: 15% }
+div.split div.gold            { width: 15%; }
+div.split div.average         { display: none; }
+div.split div.worst           { display: none; }
+div.split div.split           { display: none; }
+div.split div.running-pb      { width: 15%; }
+div.split div.running-gold    { display: none; }
+div.split div.running-average { display: none; }
+div.split div.running-worst   { display: none; }
+div.split div.running-current { display: none; }
+
+/* Segment names */
+div.split div.split-name      { flex-grow: 2; align-items: flex-start; }
+
+div.gold-split                { -webkit-text-fill-color: gold; }
+div.ahead-split               { -webkit-text-fill-color: green; }
+div.behind-split              { -webkit-text-fill-color: red; }
+div.gaining-split             { filter: brightness(115%); }
+div.losing-split              { filter: brightness(85%); }

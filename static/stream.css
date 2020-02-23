@@ -1,0 +1,74 @@
+html { height: 100%; overflow: hidden; }
+body { font-family: sans-serif; color: white; display: flex; height: 100%; }
+div#main-container { display: flex; flex-grow: 1; }
+div#app-top { display: flex; flex-grow: 1; }
+div#timer-top { display: flex; flex-grow: 1; }
+
+/* Contains the full timer */
+div#timer-container { display: flex; flex-direction: column; flex-grow: 1; }
+
+button { display: none }
+
+/* Game title */
+div#timer-title { font-size: 32px; text-align: center; font-weight: bold;
+	          background: -webkit-linear-gradient(rgba(64, 64, 128, 0), rgba(33, 33, 65, 0.3));
+                }
+/* Category name */
+div#timer-category { font-size: 21px; text-align: center;
+	             background: -webkit-linear-gradient(rgba(32, 32, 64, 0.3), rgba(0, 0, 0, 0.6));
+		     padding-bottom: 0.25em;
+                   }
+
+/* Main timer showing the full running time */
+div#main-timer {
+                 font-size: 65px; font-weight: bold; letter-spacing: -4px;
+                 text-align: right;
+               }
+
+div#main-timer.neutral        { background: -webkit-linear-gradient(#eee, #333); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer.gaining-ahead  { background: -webkit-linear-gradient(#beb, #030); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer.losing-ahead   { background: -webkit-linear-gradient(#cec, #131); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer.gaining-behind { background: -webkit-linear-gradient(#ecc, #311); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer.losing-behind  { background: -webkit-linear-gradient(#ebb, #300); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer::after         { content: " "; white-space: pre; font-size: 20px; }
+
+/* Contains splits as well as headers */
+div#splits-container  { display: flex; flex-direction: row; flex-grow: 1; align-items: stretch;
+                      }
+
+/* Contains headers with column descriptions */
+div#splits-listheader { }
+div.header div        { align-items: center }
+
+/* All row containers will have class 'split' */
+div.split { display: flex; flex-direction: row;
+          }
+
+div.split div { display: flex; flex-direction: column; flex-grow: 1;
+              }
+
+/* Denotes the currently active split */
+div#splits-container div.current { display: none;
+                                 }
+
+/* All individual split segments.  Use this to modify order/display properties/etc. */
+div.split div                 { display: none; }
+div.split div.pb              { display: none; }
+div.split div.gold            { display: none; }
+div.split div.average         { display: none; }
+div.split div.worst           { display: none; }
+div.split div.split           { display: none; }
+div.split div.running-pb      { display: none; }
+div.split div.running-gold    { display: none; }
+div.split div.running-average { display: none; }
+div.split div.running-worst   { display: none; }
+div.split div.running-current { display: none; }
+
+/* Segment names */
+div.split div.split-name      { flex-grow: 2; align-items: flex-start; }
+
+div.gold-split                { -webkit-text-fill-color: gold; }
+div.ahead-split               { -webkit-text-fill-color: green; }
+div.behind-split              { -webkit-text-fill-color: red; }
+div.gaining-split             { filter: brightness(115%); }
+div.losing-split              { filter: brightness(85%); }
