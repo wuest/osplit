@@ -1,5 +1,7 @@
 module Types exposing (..)
 
+import Timer.Types exposing ( Timer )
+
 import Json.Encode as JE
 import Time        as T
 
@@ -19,10 +21,12 @@ type Msg = OpenSocket String
          | ListSplits
          | CloseSplits
          -- Timer Controls
-         | StartSplitFinish Int
-         | Stop Int
-         | Reset Int
+         | StartSplit Int
+         | Finish Timer
          | Unsplit Int
+         | Skip Int
+         | Stop Int
+         | Reset
          -- Timer backend
          | Tick T.Posix
          | SyncTime T.Posix
@@ -36,5 +40,6 @@ type alias TimeSyncResponse = { currentTime : Int
 
 type SplitsMessage = RemoteStartSplit Int
                    | RemoteUnsplit Int
+                   | RemoteSkip Int
                    | RemoteStop Int
-                   | RemoteReset Int
+                   | RemoteReset

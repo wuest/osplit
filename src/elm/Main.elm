@@ -1,4 +1,4 @@
-module Main exposing (main)
+module Main exposing ( main )
 
 import Browser
 import Html exposing (Html)
@@ -62,17 +62,26 @@ update msg model =
             (model, send (.socket model) (Timer.syncRequest (.timer model)))
         ListSplits ->
             (model, Cmd.none) -- SPOT
+        StartSplit i -> -- this should probably be extracted
+            let t = .timer model in
+                if Timer.isCompleted (.timer model)
+                then
+                    ({ model | timer = Timer.reset t }, broadcastIntent (.socket model) (Finish <| .timer model)) -- TODO SAVE HERE
+                else
+                    ({ model | timer = Timer.update msg t }, broadcastIntent (.socket model) msg)
         _ ->
             ({ model | timer = Timer.update msg <| .timer model }, broadcastIntent (.socket model) msg)
 
 broadcastIntent : Maybe Socket -> Msg -> Cmd Msg
 broadcastIntent ms msg =
     case msg of
-        StartSplitFinish t -> send ms <| startSplitAnnounce t
-        Unsplit t          -> send ms <| unsplitAnnounce t
-        Stop t             -> send ms <| stopAnnounce t
-        Reset t            -> send ms <| resetAnnounce t
-        _                  -> Cmd.none
+        StartSplit t -> send ms <| startSplitAnnounce t
+        Finish timer -> send ms <| finishAnnounce timer
+        Unsplit t    -> send ms <| unsplitAnnounce t
+        Skip t       -> send ms <| skipAnnounce t
+        Stop t       -> send ms <| stopAnnounce t
+        Reset        -> send ms    resetAnnounce
+        _            -> Cmd.none
 
 startSplitAnnounce : Int -> JE.Value
 startSplitAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
@@ -81,6 +90,22 @@ startSplitAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
                                                            ]
                                    )
                                  ]
+
+finishAnnounce : Timer.Timer -> JE.Value
+finishAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
+                             , ( "contents", JE.object [ ( "tag", JE.string "RemoteFinish" )
+                                                       , ( "contents", Timer.toJSON t )
+                                                       ]
+                               )
+                             ]
+
+skipAnnounce : Int -> JE.Value
+skipAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
+                           , ( "contents", JE.object [ ( "tag", JE.string "RemoteSkip" )
+                                                     , ( "contents", JE.int t )
+                                                     ]
+                             )
+                           ]
 
 unsplitAnnounce : Int -> JE.Value
 unsplitAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
@@ -98,13 +123,10 @@ stopAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
                              )
                            ]
 
-resetAnnounce : Int -> JE.Value
-resetAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
-                            , ( "contents", JE.object [ ( "tag", JE.string "RemoteReset" )
-                                                      , ( "contents", JE.int t )
-                                                      ]
-                              )
-                            ]
+resetAnnounce : JE.Value
+resetAnnounce = JE.object [ ( "tag", JE.string "TimerControl" )
+                          , ( "contents", JE.object [ ( "tag", JE.string "RemoteReset" ) ] )
+                          ]
 
 processData : Model -> JE.Value -> Model
 processData model data =
@@ -114,29 +136,32 @@ processData model data =
         x                      -> model
 
 processIncomingEvent : JE.Value -> Result JD.Error WebsocketMessage
-processIncomingEvent = 
+processIncomingEvent =
         JD.decodeValue <| JD.oneOf [ timeSyncResponseDecoder, splitsControlDecoder ]
 
 timeSyncResponseDecoder : JD.Decoder WebsocketMessage
 timeSyncResponseDecoder =
-    JD.map TimeSync <| 
+    JD.map TimeSync <|
         JD.map2 TimeSyncResponse ( JD.at [ "data", "contents", "currentTime" ] JD.int )
                                  ( JD.at [ "data", "contents", "previousOffset" ] JD.int )
 
 splitsControlDecoder : JD.Decoder WebsocketMessage
-splitsControlDecoder = JD.oneOf [ decodeRemoteStartSplit, decodeRemoteUnsplit, decodeRemoteStop, decodeRemoteReset ]
+splitsControlDecoder = JD.oneOf [ decodeRemoteStartSplit, decodeRemoteUnsplit, decodeRemoteSkip, decodeRemoteStop, decodeRemoteReset ]
 
 decodeRemoteStartSplit : JD.Decoder WebsocketMessage
-decodeRemoteStartSplit = checkTag2 "RemoteStartSplit" (JD.map SplitsControl (JD.map RemoteStartSplit <| JD.at [ "data", "contents", "contents" ] JD.int))
+decodeRemoteStartSplit = checkTag "RemoteControl" <| checkTag2 "RemoteStartSplit" (JD.map SplitsControl (JD.map RemoteStartSplit <| JD.at [ "data", "contents", "contents" ] JD.int))
 
 decodeRemoteUnsplit : JD.Decoder WebsocketMessage
-decodeRemoteUnsplit = checkTag2 "RemoteUnsplit" (JD.map SplitsControl (JD.map RemoteUnsplit <| JD.at [ "data", "contents", "contents" ] JD.int))
+decodeRemoteUnsplit = checkTag "RemoteControl" <| checkTag2 "RemoteUnsplit" (JD.map SplitsControl (JD.map RemoteUnsplit <| JD.at [ "data", "contents", "contents" ] JD.int))
+
+decodeRemoteSkip : JD.Decoder WebsocketMessage
+decodeRemoteSkip = checkTag "RemoteControl" <| checkTag2 "RemoteSkip" (JD.map SplitsControl (JD.map RemoteSkip <| JD.at [ "data", "contents", "contents" ] JD.int))
 
 decodeRemoteStop : JD.Decoder WebsocketMessage
-decodeRemoteStop = checkTag2 "RemoteStop" (JD.map SplitsControl (JD.map RemoteStop <| JD.at [ "data", "contents", "contents" ] JD.int))
+decodeRemoteStop = checkTag "RemoteControl" <| checkTag2 "RemoteStop" (JD.map SplitsControl (JD.map RemoteStop <| JD.at [ "data", "contents", "contents" ] JD.int))
 
 decodeRemoteReset : JD.Decoder WebsocketMessage
-decodeRemoteReset = checkTag2 "RemoteReset" (JD.map SplitsControl (JD.map RemoteReset <| JD.at [ "data", "contents", "contents" ] JD.int))
+decodeRemoteReset = checkTag "RemoteControl" <| checkTag2 "RemoteReset" (JD.map SplitsControl (JD.succeed RemoteReset))
 
 checkTag : String -> JD.Decoder a -> JD.Decoder a
 checkTag target da = checkTag_ (JD.at [ "data", "tag" ] JD.string) target da
@@ -154,10 +179,11 @@ processTimeSync model response = { model | timeOffset = Timer.processSyncRespons
 remoteControl : SplitsMessage -> Msg
 remoteControl s =
     case s of
-        RemoteStartSplit t -> StartSplitFinish t
+        RemoteStartSplit t -> StartSplit t
         RemoteUnsplit t    -> Unsplit t
+        RemoteSkip t       -> Skip t
         RemoteStop t       -> Stop t
-        RemoteReset t      -> Reset t
+        RemoteReset        -> Reset
 
 {- SUBSCRIPTIONS -}
 subscriptions : Model -> Sub Msg
@@ -169,7 +195,7 @@ subscriptions _ = Sub.batch [ WS.subscriptions
 li : String -> Html Msg
 li string = Html.li [] [Html.text string]
 
-timerView model = 
+timerView model =
     case .activePane model of
         Splits -> Html.div [ HA.id "timer-top" ]
                            [ Timer.view <| .timer model ]

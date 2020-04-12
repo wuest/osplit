@@ -1,8 +1,11 @@
 module Timer exposing ( Timer
                       , empty, start, stop, reset
                       , edit, view, subscriptions, update
-                      , syncRequest, processSyncResponse
+                      , syncRequest, processSyncResponse, toJSON
+                      , isCompleted
                       )
+
+import Timer.Types exposing ( .. )
 
 import Html            as H
 import Html.Attributes as Attr
@@ -14,60 +17,9 @@ import Types exposing ( Msg(..), TimeSyncResponse )
 
 import Debug as D
 
-type Timer = Stopped Splits
-           | Running Splits
-
-type Position = Previous
-              | Current
-              | Upcoming
-
-type TimeStatus = Ahead
-                | Behind
-                | Gold
-
-type TimeChange = Gaining TimeStatus
-                | Losing TimeStatus
-
-type alias Time = T.Posix
-type alias Icon = Maybe String
-type alias SplitSet = List Split
-
-type alias Segment = { name      : String
-                     , icon      : Icon
-                     , pb        : Maybe Int
-                     , gold      : Maybe Int
-                     , average   : Maybe Int
-                     , worst     : Maybe Int
-                     }
-
-type alias Split = { segment : Segment
-                   , time    : Maybe Int
-                   , change  : Maybe TimeChange
-                   }
-
-type alias Game = { name   : String
-                  , icon   : Icon
-                  , offset : Int
-                  }
-
-type alias Splits = { started   : Time
-                    , current   : Time
-                    , elapsed   : Int
-                    , game      : Game
-                    , category  : String
-                    , passed    : SplitSet
-                    , split     : Maybe Split
-                    , remaining : SplitSet
-                    }
-
-type alias TimeSum = { pb : Int
-                     , gold : Int
-                     , average : Int
-                     , worst : Int
-                     , current : Int
-                     }
-
 type alias SplitsListAccumulator = (Int, TimeSum, List (H.Html Msg))
+
+type alias Timer = Timer.Types.Timer
 
 {- BASE TIMER FUNCTIONS -}
 empty : Timer
@@ -75,9 +27,9 @@ empty = Stopped { started   = zero
                 , current   = zero
                 , elapsed   = 0
                 , game      = noGame
-                , category  = "H'aanit"
-                , passed    = [] -- TODO noSplits
-                , split     = Just noSplit
+                , category  = ""
+                , passed    = noSplits
+                , split     = noSplit
                 , remaining = noSplits
                 }
 
@@ -85,6 +37,11 @@ elapsed : Timer -> Int
 elapsed t = case t of
     Running s -> (.elapsed s) + ((millis <| .current s) - (millis <| .started s))
     Stopped s -> .elapsed s
+
+isCompleted : Timer -> Bool
+isCompleted t = case t of
+    Running _ -> False
+    Stopped s -> (.split s) == Nothing
 
 start : Timer -> Int -> Timer
 start t i = case t of
@@ -111,7 +68,7 @@ resetSplitsFor t =
             Nothing ->
                 case List.head (.passed s) of
                     Nothing -> s
-                    Just s_ -> { s | split = Just { s_ | time = Nothing, change = Nothing }, remaining = List.map (\x -> { x | time = Nothing }) <| List.drop 1 <| .passed s, passed = [] }
+                    Just s_ -> { s | split = Just { s_ | time = Nothing, change = Nothing }, remaining = List.map (\x -> { x | time = Nothing, change = Nothing }) <| List.drop 1 <| .passed s, passed = [] }
             Just s_ ->
                 let fullList = List.map (\x -> { x | time = Nothing, change = Nothing }) <| List.concat [.passed s, [s_], .remaining s]
                 in
@@ -164,11 +121,28 @@ unsplit_ s =
                        ,     remaining = s_ :: (.remaining s)
                        }
 
+skip : Timer -> Timer
+skip t = case t of
+    Running s -> skip_ s
+    Stopped s -> t
+
+skip_ : Splits -> Timer
+skip_ s =
+    case .split s of
+        Nothing -> Running s -- Cannot skip final split
+        Just s_ -> let skippedSplit = { s_ | change = Just Skipped }
+                       newPassed    = List.append (.passed s) [skippedSplit]
+                       remaining    = .remaining s
+                   in
+                       case List.head remaining of
+                           Nothing -> Running s -- Cannot skip final split
+                           next    -> Running { s | passed = newPassed, split = next, remaining = List.drop 1 remaining }
+
 {- FORMATTING -}
-show : Int -> Timer -> String
+show : Int -> Timer -> H.Html Msg
 show minSegments t = show_ minSegments (elapsed t) False
 
-show_ : Int -> Int -> Bool -> String
+show_ : Int -> Int -> Bool -> H.Html Msg
 show_ minSegments uSeconds showSign =
     let n  = if uSeconds < 0 then "-" else
                  if showSign == True then "+" else ""
@@ -180,10 +154,26 @@ show_ minSegments uSeconds showSign =
         s  = mr // second
         u  = mr - (s * second)
     in
-        n ++
-        (if minSegments > 3 || h > 0       then timerSegment h ++ ":" else "") ++
-        (if minSegments > 2 || (h + m) > 0 then timerSegment m ++ ":" else "") ++
-        timerSegment s ++ "." ++ (timerSegment <| u // 10)
+        H.div [ Attr.class "time-readout" ]
+              ( List.concat [ [(H.div [ Attr.class "time-sign" ] [ H.text n ])]
+                            , clockSegments minSegments h m s u
+                            ]
+              )
+
+clockSegments : Int -> Int -> Int -> Int -> Int -> List (H.Html Msg)
+clockSegments minSegments h m s u =
+    let hD = if minSegments > 3 || h > 0 then [ H.div [ Attr.class "time-hour" ] [ H.text <| timerSegment False h ] ] else []
+        mD = if minSegments > 2 || (h + m) > 0 then [ H.div [ Attr.class "time-minute" ] [ H.text <| timerSegment (h > 0 || minSegments > 3) m ] ] else []
+        sD = [ H.div [ Attr.class "time-second" ] [ H.text <| timerSegment True s ] ]
+        uD = [ H.div [ Attr.class "time-usecond" ] [ H.text <| timerSegment True <| u // 10 ] ]
+    in
+        List.concat [List.intersperse divC <| List.concat [hD, mD, sD], [divD], uD]
+
+divC : H.Html Msg
+divC = H.div [ Attr.class "time-colon" ] [ H.text ":" ]
+
+divD : H.Html Msg
+divD = H.div [ Attr.class "time-decimal" ] [ H.text "." ]
 
 game : Timer -> String
 game = splitsFor >> .game >> .name
@@ -215,11 +205,12 @@ view t =
           , H.div [ Attr.id "main-timer"
                   , Attr.class <| timerClass t
                   ]
-                  [ H.text <| show 2 t ]
-          , H.button [ Event.onClick <| StartSplitFinish (elapsed t) ] [ H.text "Start/Split" ]
+                  [ show 3 t ]
+          , H.button [ Event.onClick <| StartSplit (elapsed t) ] [ H.text "Start/Split" ]
           , H.button [ Event.onClick <| Unsplit (elapsed t) ] [ H.text "Unsplit" ]
+          , H.button [ Event.onClick <| Skip (elapsed t) ] [ H.text "Skip" ]
           , H.button [ Event.onClick <| Stop (elapsed t) ] [ H.text "Stop" ]
-          , H.button [ Event.onClick <| Reset (elapsed t) ] [ H.text "Reset" ]
+          , H.button [ Event.onClick Reset ] [ H.text "Reset" ]
           ]
 
 timerClass : Timer -> String
@@ -244,6 +235,7 @@ timerClass t =
                                 case x of
                                     Behind -> "losing-behind"
                                     _ -> "losing-ahead"
+                            _ -> "impossible"
 
 timerClass_ : Splits -> Int -> String
 timerClass_ s elapsedTime =
@@ -265,6 +257,7 @@ timerClass_ s elapsedTime =
                                 case x of
                                     Behind -> "losing-behind"
                                     _ -> "losing-ahead"
+                            _ -> "impossible"
         Just s_ ->
             let segmentTime = elapsedTime - (List.sum <| List.map (.time >> tfm) (.passed s))
                 splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), Just -1) -- Gold is set to impossible value
@@ -279,23 +272,24 @@ timerClass_ s elapsedTime =
                         case x of
                             Behind -> "losing-behind"
                             _ -> "losing-ahead"
+                    _ -> "impossible"
 
 splitsListHeader : H.Html Msg
 splitsListHeader =
     H.div [ Attr.id "split-listheader"
           , Attr.classList [("header", True), ("split", True)]
           ]
-          [ H.div [ Attr.id <| "split-listheader-name", Attr.class "split-name" ] [ H.text "" ]
-          , H.div [ Attr.id <| "split-listheader-pb", Attr.class "pb" ] [ H.text "+/- pb" ]
-          , H.div [ Attr.id <| "split-listheader-gold", Attr.class "gold" ] [ H.text "+/- gold" ]
-          , H.div [ Attr.id <| "split-listheader-average", Attr.class "average" ] [ H.text "+/- avg" ]
-          , H.div [ Attr.id <| "split-listheader-worst", Attr.class "worst" ] [ H.text "+/- worst" ]
-          , H.div [ Attr.id <| "split-listheader-split", Attr.class "split" ] [ H.text "" ]
-          , H.div [ Attr.id <| "split-listheader-pb", Attr.class "running-pb" ] [ H.text "+/- pb" ]
-          , H.div [ Attr.id <| "split-listheader-gold", Attr.class "running-gold" ] [ H.text "+/- gold" ]
-          , H.div [ Attr.id <| "split-listheader-average", Attr.class "running-average" ] [ H.text "+/- avg" ]
-          , H.div [ Attr.id <| "split-listheader-worst", Attr.class "running-worst" ] [ H.text "+/- worst" ]
-          , H.div [ Attr.id <| "split-listheader-split", Attr.class "running-current" ] [ H.text "" ]
+          [ H.div [ Attr.id <| "split-listheader-name", Attr.classList [("split-column", True), ("split-name", True)] ] [ H.text "" ]
+          , H.div [ Attr.id <| "split-listheader-pb", Attr.classList [("split-column", True), ("pb", True)] ] [ H.text "+/- pb" ]
+          , H.div [ Attr.id <| "split-listheader-gold", Attr.classList [("split-column", True), ("gold", True)] ] [ H.text "+/- gold" ]
+          , H.div [ Attr.id <| "split-listheader-average", Attr.classList [("split-column", True), ("average", True)] ] [ H.text "+/- avg" ]
+          , H.div [ Attr.id <| "split-listheader-worst", Attr.classList [("split-column", True), ("worst", True)] ] [ H.text "+/- worst" ]
+          , H.div [ Attr.id <| "split-listheader-split", Attr.classList [("split-column", True), ("split", True)] ] [ H.text "" ]
+          , H.div [ Attr.id <| "split-listheader-pb", Attr.classList [("split-column", True), ("running-pb", True)] ] [ H.text "+/- pb" ]
+          , H.div [ Attr.id <| "split-listheader-gold", Attr.classList [("split-column", True), ("running-gold", True)] ] [ H.text "+/- gold" ]
+          , H.div [ Attr.id <| "split-listheader-average", Attr.classList [("split-column", True), ("running-average", True)] ] [ H.text "+/- avg" ]
+          , H.div [ Attr.id <| "split-listheader-worst", Attr.classList [("split-column", True), ("running-worst", True)] ] [ H.text "+/- worst" ]
+          , H.div [ Attr.id <| "split-listheader-split", Attr.classList [("split-column", True), ("running-current", True)] ] [ H.text "" ]
           ]
 
 splitsList : Timer -> H.Html Msg
@@ -304,12 +298,14 @@ splitsList t =
         r = elapsed t
         initSum = { pb = 0, gold = 0, average = 0, worst = 0, current = 0 }
         (n, times, hs) = List.foldl (splitsList_ Previous r) (0, initSum, []) (.passed s)
+        currentStatus = case t of Running _ -> Current
+                                  Stopped _ -> Upcoming
     in
         case .split s of
             Nothing   ->
                 H.div [ Attr.id "splits-container" ] (splitsListHeader :: (List.reverse hs))
             Just next ->
-                let (n_, times_, hs_)  = splitsList_ Current r next (n, times, hs)
+                let (n_, times_, hs_)  = splitsList_ currentStatus r next (n, times, hs)
                     (_, _, hs__) = List.foldl (splitsList_ Upcoming r) (n_, times_, hs_) (.remaining s)
                 in
                   H.div [ Attr.id "splits-container" ] (splitsListHeader :: (List.reverse hs__))
@@ -330,22 +326,39 @@ splitsList_ relativePosition runningTime thisSplit (n, times, hs) =
                ,         worst = (.worst times) + w
                ,         current = (.current times) + s
                }
+        divContent = case .change thisSplit of
+                         Just Skipped ->
+                             [ H.div [ Attr.id <| "split-" ++ pos ++ "-name", Attr.class "split-name" ] [ H.text <| (.segment >> .name) thisSplit ]
+                             , runningDiv pos "pb" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             , runningDiv pos "gold" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             , runningDiv pos "average" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             , runningDiv pos "worst" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             , runningDiv pos "split" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+
+                             , runningDiv pos "running-pb" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             , runningDiv pos "running-gold" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             , runningDiv pos "running-average" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             , runningDiv pos "running-worst" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             , runningDiv pos "running-current" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
+                             ]
+                         _ ->
+                             [ H.div [ Attr.id <| "split-" ++ pos ++ "-name", Attr.class "split-name" ] [ H.text <| (.segment >> .name) thisSplit ]
+                             , runningDiv pos "pb" <| conditionalOffset relativePosition pb s
+                             , runningDiv pos "gold" <| conditionalOffset relativePosition g s
+                             , runningDiv pos "average" <| conditionalOffset relativePosition a s
+                             , runningDiv pos "worst" <| conditionalOffset relativePosition w s
+                             , runningDiv pos "split" <| show_ 2 s False
+
+                             , runningDiv pos "running-pb" <| conditionalOffset relativePosition (.pb nt) (.current nt)
+                             , runningDiv pos "running-gold" <| conditionalOffset relativePosition (.gold nt) (.current nt)
+                             , runningDiv pos "running-average" <| conditionalOffset relativePosition (.average nt) (.current nt)
+                             , runningDiv pos "running-worst" <| conditionalOffset relativePosition (.worst nt) (.current nt)
+                             , runningDiv pos "running-current" <| conditionalOffset_ relativePosition (.current nt) runningTime
+                             ]
         div  = H.div [ Attr.id ("split-" ++ pos)
                      , Attr.classList <| List.concat [[("split", True), ("current", relativePosition == Current)], changeDisplay <| .change thisSplit]
                      ]
-                     [ H.div [ Attr.id <| "split-" ++ pos ++ "-name", Attr.class "split-name" ] [ H.text <| (.segment >> .name) thisSplit ]
-                     , runningDiv pos "pb" <| conditionalOffset relativePosition pb s
-                     , runningDiv pos "gold" <| conditionalOffset relativePosition g s
-                     , runningDiv pos "average" <| conditionalOffset relativePosition a s
-                     , runningDiv pos "worst" <| conditionalOffset relativePosition w s
-                     , runningDiv pos "split" <| show_ 2 s False
-
-                     , runningDiv pos "running-pb" <| conditionalOffset relativePosition (.pb nt) (.current nt)
-                     , runningDiv pos "running-gold" <| conditionalOffset relativePosition (.gold nt) (.current nt)
-                     , runningDiv pos "running-average" <| conditionalOffset relativePosition (.average nt) (.current nt)
-                     , runningDiv pos "running-worst" <| conditionalOffset relativePosition (.worst nt) (.current nt)
-                     , runningDiv pos "running-current" <| conditionalOffset_ relativePosition (.current nt) runningTime
-                     ]
+                     divContent
     in
         (n + 1, nt, div :: hs)
 
@@ -364,27 +377,27 @@ changeDisplay maybeChange =
                     case x of
                         Behind -> [("behind-split", True), ("losing-split", True)]
                         _ -> [("ahead-split", True), ("losing-split", True)] -- Pattern match everything; gold is impossible here.
+                Skipped -> [("skipped-split", True)]
 
-conditionalOffset : Position -> Int -> Int -> String
+conditionalOffset : Position -> Int -> Int -> H.Html Msg
 conditionalOffset pos segmentTime currentTime =
     case pos of
         Previous -> show_ 2 (currentTime - segmentTime) True
         _        -> show_ 2 segmentTime False
 
-conditionalOffset_ : Position -> Int -> Int -> String
+conditionalOffset_ : Position -> Int -> Int -> H.Html Msg
 conditionalOffset_ pos segmentTime runningTime =
     case pos of
-        Upcoming -> show_ 2 0 False
+        Upcoming -> H.div [] []
         Current  -> show_ 2 runningTime False
         Previous -> show_ 2 segmentTime False
 
-runningDiv : String -> String -> String -> H.Html Msg
+runningDiv : String -> String -> H.Html Msg -> H.Html Msg
 runningDiv id tag displayTime =
     H.div [ Attr.id <| "split-" ++ id ++ "-" ++ tag
-          , Attr.class tag
-          , Attr.class "segmentTime"
+          , Attr.classList [("split-column", True), (tag, True), ("segmentTime", True)]
           ]
-          [ H.text displayTime ]
+          [ displayTime ]
 
 {- SUBSCRIPTIONS -}
 subscriptions : Sub Msg
@@ -395,10 +408,11 @@ subscriptions = Sub.batch [ T.every 1 Tick
 {- UPDATE -}
 update : Msg -> Timer -> Timer
 update msg t = case msg of
-    StartSplitFinish i -> start t i
-    Stop _             -> stop t
-    Reset _            -> reset t
+    StartSplit i -> start t i
     Unsplit _          -> unsplit t
+    Skip _             -> skip t
+    Stop _             -> stop t
+    Reset              -> reset t
     Tick tick          -> setTime t tick
     CloseSplits        -> empty
     _                  -> t
@@ -423,6 +437,32 @@ processSyncResponse t response =
     let currentTime = (splitsFor >> .current >> millis) t in
         ((currentTime - (.currentTime response)) + (.previousOffset response)) // 2
 
+toJSON : Timer -> JE.Value
+toJSON t =
+    let pull ms = case ms of
+            Nothing -> []
+            Just js -> [js]
+        p = .passed <| splitsFor t
+        s = pull (.split <| splitsFor t)
+        r = .remaining <| splitsFor t
+        allSplits =  p ++ s ++ r
+    in
+        JE.list toJSON_ <| List.filter (\x -> (.entityID <| .segment x) /= Nothing) allSplits
+
+toJSON_ : Split -> JE.Value
+toJSON_ s =
+    case .entityID <| .segment s of
+        Just i  -> JE.object [ ("segment", JE.int i)
+                             , ("time", toJSON__ <| .time s)
+                             ]
+        Nothing -> JE.null -- unreachable
+
+toJSON__ : Maybe Int -> JE.Value
+toJSON__ x =
+    case x of
+        Just y  -> JE.int y
+        Nothing -> JE.null
+
 {- HELPER FUNCTIONS -}
 millis : Time -> Int
 millis = T.posixToMillis
@@ -434,25 +474,17 @@ zero : Time
 zero = T.millisToPosix 0
 
 noGame : Game
-noGame = { name   = "Octopath Traveler"
-         , icon   = Nothing
-         , offset = 0
+noGame = { entityID = Nothing
+         , name     = ""
+         , icon     = Nothing
+         , offset   = 0
          }
 
-noSplit : Split
-noSplit = { segment = { name = "Ghisarma", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 999999999, worst = Just 999999999 }, time = Nothing, change = Nothing }
+noSplit : Maybe Split
+noSplit = Just { segment = { entityID = Nothing, name = "", icon = Nothing, pb = Nothing, gold = Nothing, average = Nothing, worst = Nothing }, time = Nothing, change = Nothing }
 
 noSplits : SplitSet
-noSplits = [ { segment = { name = "Evasive Maneuvers", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           , { segment = { name = "Merchant Shrine", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           , { segment = { name = "Cyrus", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           , { segment = { name = "Tressa", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           , { segment = { name = "Therion", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           , { segment = { name = "Enter Marsalim", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           , { segment = { name = "Lord of the Forest", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           , { segment = { name = "Dragon", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           , { segment = { name = "Redeyes", icon = Nothing, pb = Just 99999999, gold = Just 1, average = Just 99999999, worst = Just 99999999 }, time = Nothing, change = Nothing }
-           ]
+noSplits = []
 
 splitsFor : Timer -> Splits
 splitsFor t = case t of
@@ -481,8 +513,9 @@ partitionAt i xs =
             Just b_ -> Just (a, b_, c)
             Nothing -> Nothing
 
-timerSegment : Int -> String
-timerSegment i = String.pad 2 '0' <| String.fromInt i
+timerSegment : Bool -> Int -> String
+timerSegment padTime i =
+    if padTime then String.pad 2 '0' <| String.fromInt i else String.fromInt i
 
 -- "time from maybe"
 tfm : Maybe Int -> Int
@@ -499,7 +532,7 @@ timeStatus (elapsedTotal, segmentTime) (compareTotal, goldTime) =
             then Gold
             else case compareTotal of
                 Nothing -> Ahead
-                Just ct -> 
+                Just ct ->
                     if elapsedTotal <= ct
                     then Ahead
                     else Behind

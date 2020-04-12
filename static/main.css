@@ -1,11 +1,18 @@
-body { font-family: sans-serif; }
+body { font-family: sans-serif; display: flex; }
+
+button { display: inline-block; }
+
+/* Top-level containers */
+div#main-container { display: flex; flex-grow: 1; }
+div#app-top { display: flex; flex-grow: 1; }
+div#timer-top { display: flex; flex-grow: 1; }
 
 /* Menu button */
 div#menu-container    { position: absolute; top: 0px; right: 0px; }
 div.menu-button:hover { text-shadow: 0 0 3px #F00, 0 0 5px #00F; cursor: default; }
 
 /* Contains the full timer */
-div#timer-container { }
+div#timer-container { display: flex; flex-direction: column; flex-grow: 1; }
 
 /* Game title */
 div#timer-title { font-size: 20px; text-align: center;
@@ -25,9 +32,11 @@ div#main-timer.gaining-ahead  { background: -webkit-linear-gradient(#beb, #030);
 div#main-timer.losing-ahead   { background: -webkit-linear-gradient(#cec, #131); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
 div#main-timer.gaining-behind { background: -webkit-linear-gradient(#ecc, #311); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
 div#main-timer.losing-behind  { background: -webkit-linear-gradient(#ebb, #300); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+div#main-timer::after         { content: " "; white-space: pre; font-size: 20px; }
 
 /* Contains splits as well as headers */
-div#splits-container  { }
+div#splits-container             { }
+div#splits-container > div.split { display: flex; flex-direction: row; flex-grow: 1; }
 
 /* Contains headers with column descriptions */
 div#splits-listheader { }
@@ -37,15 +46,12 @@ div.header div        { align-items: center }
 div.split { display: flex; flex-direction: row;
           }
 
-div.split div { display: flex; flex-direction: column; flex-grow: 1;
-              }
-
 /* Denotes the currently active split */
-div#splits-container div.current { display: flex; flex-direction: row; flex-grow: 1;
-                                 }
+div#splits-container > div.current { display: flex; flex-direction: row; flex-grow: 1;
+                                   }
 
 /* All individual split segments.  Use this to modify order/display properties/etc. */
-div.split div                 { flex-wrap: nowrap; flex-grow: 0; align-items: flex-end; padding-right: 2px; color: black; -webkit-text-stroke: 0.5px gray; font-size: 20px; font-weight: bold; }
+div.split div                 { flex-wrap: nowrap; flex-grow: 0; align-items: flex-end; padding-right: 2px; color: black; font-size: 20px; font-weight: bold; }
 div.split div.pb              { width: 15% }
 div.split div.gold            { width: 15%; }
 div.split div.average         { display: none; }
@@ -57,11 +63,28 @@ div.split div.running-average { display: none; }
 div.split div.running-worst   { display: none; }
 div.split div.running-current { display: none; }
 
-/* Segment names */
-div.split div.split-name      { flex-grow: 2; align-items: flex-start; }
+/* Split Time segments */
+div.split-column > div.time-readout { justify-content: flex-end; }
+div#main-timer   > div.time-readout { justify-content: center; }
+div.time-readout                    { display: flex; flex-direction: row; flex-wrap: nowrap; text-align: right; padding-right: 0.2em; }
+div.time-usecond                    { width: 2ex; }
+div.time-second                     { width: 2ex; }
+div.time-minute                     { width: 2ex; }
+div.time-hour                       { width: 2ex; }
 
-div.gold-split                { -webkit-text-fill-color: gold; }
-div.ahead-split               { -webkit-text-fill-color: green; }
-div.behind-split              { -webkit-text-fill-color: red; }
+/* Segment names */
+div.split div.split-name      { flex-grow: 2; align-items: flex-start;
+                                padding-left: 0.2em;
+                              }
+
+div.gold-split                { -webkit-text-fill-color: gold;
+                                text-shadow: 0px 0px 4px black;
+                              }
+div.ahead-split               { -webkit-text-fill-color: green;
+                                text-shadow: 0px 0px 4px black;
+                              }
+div.behind-split              { -webkit-text-fill-color: red;
+                                text-shadow: 0px 0px 4px black;
+                              }
 div.gaining-split             { filter: brightness(115%); }
 div.losing-split              { filter: brightness(85%); }

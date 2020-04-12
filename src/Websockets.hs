@@ -102,12 +102,18 @@ processCommand (Message.TimerControl (Message.RemoteStartSplit i)) clientId stat
 processCommand (Message.TimerControl (Message.RemoteUnsplit i)) clientId stateRef = do
     sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ unsplit i
     return ackResponse
+processCommand (Message.TimerControl (Message.RemoteSkip i)) clientId stateRef = do
+    sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ skip i
+    return ackResponse
 processCommand (Message.TimerControl (Message.RemoteStop i)) clientId stateRef = do
     sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ stopSplits i
     return ackResponse
-processCommand (Message.TimerControl (Message.RemoteReset i)) clientId stateRef = do
-    sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset i
-
+processCommand (Message.TimerControl (Message.RemoteReset)) clientId stateRef = do
+    print reset
+    sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
+    return ackResponse
+processCommand (Message.TimerControl (Message.RemoteFinish s)) clientId stateRef = do
+    sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
     return ackResponse
 processCommand _ _ _ = return unsupportedResponse
 
@@ -117,11 +123,14 @@ startSplit i = Message.RemoteControl (Message.RemoteStartSplit i)
 unsplit :: Int -> Message.Response
 unsplit i = Message.RemoteControl (Message.RemoteUnsplit i)
 
+skip :: Int -> Message.Response
+skip i = Message.RemoteControl (Message.RemoteSkip i)
+
 stopSplits :: Int -> Message.Response
 stopSplits i = Message.RemoteControl (Message.RemoteStop i)
 
-reset :: Int -> Message.Response
-reset i = Message.RemoteControl (Message.RemoteReset i)
+reset :: Message.Response
+reset = Message.RemoteControl Message.RemoteReset
 
 ackResponse :: Message.Response
 ackResponse = Message.Raw { Message.respType = "ack", Message.respData = "[]" }
