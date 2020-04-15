@@ -35,18 +35,18 @@ Game
 
 Category
     name   Text
-    game   Game
+    game   GameId
     offset Int
     deriving Show Generic
 
 Segment
-    category Category
+    category CategoryId
     name     Text
     icon     Text Maybe
     deriving Show Generic
 
 Attempt
-    category    Category
+    category    CategoryId
     startTime   UTCTime
     startSynced Bool
     endTime     UTCTime
@@ -55,8 +55,8 @@ Attempt
     deriving Show Generic
 
 Split
-    attempt Attempt
-    segment Segment
+    attempt AttemptId
+    segment SegmentId
     elapsed Int
     deriving Show Generic
 |]

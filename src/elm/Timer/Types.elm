@@ -41,11 +41,16 @@ type alias Game = { entityID : Maybe Int
                   , offset   : Int
                   }
 
+type alias Category = { entityID : Maybe Int
+                      , name     : String
+                      , offset   : Int
+                      }
+
 type alias Splits = { started   : Time
                     , current   : Time
                     , elapsed   : Int
                     , game      : Game
-                    , category  : String
+                    , category  : Category
                     , passed    : SplitSet
                     , split     : Maybe Split
                     , remaining : SplitSet

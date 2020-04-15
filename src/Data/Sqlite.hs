@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts  #-}
 
-module Data.Sqlite ( DBPool, DBPoolM
+module Data.Sqlite ( DBPool, DBPoolM, Query
                    , connect, run, initialize
                    ) where
 
@@ -23,14 +23,14 @@ import qualified Opts as O
 newtype DBPool = DBPool { getPool :: ConnectionPool }
 type DBPoolM = ReaderT DBPool IO
 
-type Query = ReaderT SqlBackend IO ()
+type Query m = ReaderT SqlBackend IO m
 
 connect :: FilePath -> IO DBPool
 connect path = do
     pool <- runStdoutLoggingT $ createSqlitePool (pack path) 10
     return $ DBPool pool
 
-run :: Query -> DBPoolM ()
+run :: Query m -> DBPoolM m
 run query = do
     pool <- asks getPool
     liftIO $ runSqlPool query pool

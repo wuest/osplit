@@ -23,7 +23,7 @@ start :: Int -> FilePath -> DB.DBPool -> IO ()
 start port base dbPool = do
     appState <- WS.initState
     scottyT port (`runReaderT` dbPool) $ do
-        middleware $ websocketsOr defaultConnectionOptions $ WS.app appState
+        middleware $ websocketsOr defaultConnectionOptions $ WS.app dbPool appState
         middleware $ staticPolicy $ noDots >-> hasPrefix "static" >-> addBase base
         Routes.routes
 

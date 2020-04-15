@@ -21,7 +21,14 @@ import qualified Data.Time.Clock.POSIX          as Clock
 
 import qualified Network.WebSockets             as WS
 
+import qualified Data.Sqlite                    as DB
+import qualified Database.Persist.Sqlite        as SQL
+import qualified Data.Model                     as Model
+
+import Database.Persist.Sqlite ( (==.), entityKey, entityVal )
+
 import Control.Monad.IO.Class  ( liftIO )
+import Control.Monad.Reader    ( runReaderT )
 import Data.Text.Lazy.Encoding ( decodeUtf8 )
 import Data.Text.Lazy          ( toStrict )
 
@@ -64,57 +71,73 @@ sendFrom clientId stateRef msg = do
     Monad.forM_ otherClients $ \(_, conn) ->
         WS.sendTextData conn msg
 
-sendTo :: WS.Connection -> Text.Text -> IO ()
-sendTo = WS.sendTextData
+sendTo :: ClientId -> Concurrent.MVar State -> Text.Text -> IO ()
+sendTo clientId stateRef msg = do
+    clients <- Concurrent.readMVar stateRef
+    let client = List.filter ((==) clientId . fst) clients
+    Monad.forM_ client $ \(_, conn) ->
+        WS.sendTextData conn msg
 
 sendJSON :: JSON.ToJSON a => WS.Connection -> a -> IO ()
-sendJSON conn = (sendTo conn) . toStrict . decodeUtf8 . JSON.encode
+sendJSON conn = (WS.sendTextData conn) . toStrict . decodeUtf8 . JSON.encode
 
-startApp :: WS.Connection -> ClientId -> Concurrent.MVar State -> IO ()
-startApp conn clientId stateRef = Monad.forever $ do
+startApp' :: DB.DBPool -> WS.Connection -> ClientId -> Concurrent.MVar State -> IO ()
+startApp' db conn clientId stateRef = runReaderT (startApp conn clientId stateRef) db
+
+startApp :: WS.Connection -> ClientId -> Concurrent.MVar State -> DB.DBPoolM ()
+startApp conn clientId stateRef = do
     d <- liftIO $ WS.receiveData conn
     case (JSON.decode d :: Maybe Message.Command) of
       Nothing -> do
           liftIO $ sendJSON conn unsupportedResponse
+          startApp conn clientId stateRef
       Just cmd -> do
           response <- processCommand cmd clientId stateRef
           liftIO $ sendJSON conn response
+          startApp conn clientId stateRef
 
-app :: Concurrent.MVar State -> WS.PendingConnection -> IO ()
-app stateRef pendingConn = do
+app :: DB.DBPool -> Concurrent.MVar State -> WS.PendingConnection -> IO ()
+app db stateRef pendingConn = do
     conn <- WS.acceptRequest pendingConn
     clientId <- connectClient conn stateRef
+
     WS.withPingThread conn 10 (return ()) $
         Exception.finally
-            (startApp conn clientId stateRef)
+            (startApp' db conn clientId stateRef)
             (disconnectClient clientId stateRef)
 
 initState :: IO (Concurrent.MVar State)
 initState = Concurrent.newMVar []
 
-processCommand :: Message.Command -> ClientId -> Concurrent.MVar State  -> IO Message.Response
+processCommand :: Message.Command -> ClientId -> Concurrent.MVar State  -> DB.DBPoolM Message.Response
 processCommand (Message.TimeSyncInit timeState) _ _ = do
-    now <- round . (1000 *) <$> Clock.getPOSIXTime
+    now <- liftIO $ round . (1000 *) <$> Clock.getPOSIXTime
     return $ Message.TimeSyncResponse $ Message.TimeState { Message.currentTime = now, Message.previousOffset = Just (now - Message.currentTime timeState) }
+
 processCommand (Message.TimerControl (Message.RemoteStartSplit i)) clientId stateRef = do
-    sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ startSplit i
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ startSplit i
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteUnsplit i)) clientId stateRef = do
-    sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ unsplit i
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ unsplit i
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteSkip i)) clientId stateRef = do
-    sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ skip i
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ skip i
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteStop i)) clientId stateRef = do
-    sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ stopSplits i
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ stopSplits i
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteReset)) clientId stateRef = do
-    print reset
-    sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteFinish s)) clientId stateRef = do
-    sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
+    liftIO $ sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
     return ackResponse
+
+processCommand (Message.Menu Message.MenuGames) clientId stateRef = do
+    gameList >>= return
+processCommand (Message.Menu (Message.MenuCategories i)) clientId stateRef = do
+    categoryList i >>= return
+
 processCommand _ _ _ = return unsupportedResponse
 
 startSplit :: Int -> Message.Response
@@ -137,3 +160,25 @@ ackResponse = Message.Raw { Message.respType = "ack", Message.respData = "[]" }
 
 unsupportedResponse :: Message.Response
 unsupportedResponse = Message.Raw { Message.respType = "UnsupportedCommand", Message.respData = "[]" }
+
+gameList :: DB.DBPoolM Message.Response
+gameList = do
+    games <- DB.run $ SQL.selectList [] [] :: DB.DBPoolM [SQL.Entity Model.Game]
+    return $ Message.GameList $ fmap gameList' games
+
+gameList' :: SQL.Entity Model.Game -> Message.Game
+gameList' g = do
+    let game = entityVal g
+        gameId = fromIntegral . SQL.fromSqlKey . entityKey $ g
+      in Message.Game gameId game
+
+categoryList :: Int -> DB.DBPoolM Message.Response
+categoryList game = do
+    games <- DB.run $ SQL.selectList [ Model.CategoryGame ==. (SQL.toSqlKey $ fromIntegral game) ] []
+    return $ Message.CategoryList $ fmap categoryList' games
+
+categoryList' :: SQL.Entity Model.Category -> Message.Category
+categoryList' c = do
+    let cat = entityVal c
+        cid = fromIntegral . SQL.fromSqlKey . entityKey $ c
+      in Message.Category cid cat

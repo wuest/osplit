@@ -27,7 +27,7 @@ empty = Stopped { started   = zero
                 , current   = zero
                 , elapsed   = 0
                 , game      = noGame
-                , category  = ""
+                , category  = noCategory
                 , passed    = noSplits
                 , split     = noSplit
                 , remaining = noSplits
@@ -179,7 +179,7 @@ game : Timer -> String
 game = splitsFor >> .game >> .name
 
 category : Timer -> String
-category = splitsFor >> .category
+category = splitsFor >> .category >> .name
 
 hour : number
 hour = 3600000 -- 60 minutes * 60 seconds * 1000 milliseconds
@@ -481,10 +481,16 @@ noGame = { entityID = Nothing
          }
 
 noSplit : Maybe Split
-noSplit = Just { segment = { entityID = Nothing, name = "", icon = Nothing, pb = Nothing, gold = Nothing, average = Nothing, worst = Nothing }, time = Nothing, change = Nothing }
+noSplit = Just { segment = { entityID = Just -1, name = "", icon = Nothing, pb = Nothing, gold = Nothing, average = Nothing, worst = Nothing }, time = Nothing, change = Nothing }
 
 noSplits : SplitSet
-noSplits = []
+noSplits = [ ]
+
+noCategory : Category
+noCategory = { entityID = Nothing
+             , name = ""
+             , offset = 0
+             }
 
 splitsFor : Timer -> Splits
 splitsFor t = case t of

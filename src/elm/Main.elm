@@ -10,6 +10,7 @@ import Json.Decode as JD
 import Types exposing (Msg(..), Socket, WebsocketMessage(..), SplitsMessage(..), TimeSyncResponse)
 import Websocket as WS
 import Timer as Timer
+import Timer.Types as TT
 
 import Debug as D
 
@@ -22,19 +23,27 @@ main = Browser.element
 
 {- MODEL -}
 
-type alias Model = { socket : Maybe Socket
-                   , timer : Timer.Timer
-                   , timeOffset : Int
-                   , activePane : TimerPane
+type alias Model = { socket       : Maybe Socket
+                   , timer        : Timer.Timer
+                   , timeOffset   : Int
+                   , activePane   : TimerPane
+                   , menuPane     : MenuPane
+                   , gameList     : List TT.Game
+                   , categoryList : List TT.Category
                    }
 
 type TimerPane = Splits | Menu
+
+type MenuPane = MainMenu | GameList | CategoryList
 
 init : String -> (Model, Cmd Msg)
 init url = ( { socket = Nothing
              , timer = Timer.empty
              , timeOffset = 0
              , activePane = Splits
+             , menuPane = MainMenu
+             , gameList = []
+             , categoryList = []
              }
            , WS.open url
            )
@@ -60,8 +69,12 @@ update msg model =
             (processData model data, Cmd.none)
         SyncTime _ ->
             (model, send (.socket model) (Timer.syncRequest (.timer model)))
-        ListSplits ->
-            (model, Cmd.none) -- SPOT
+        ToggleMainMenu ->
+            (toggleMainMenu model, Cmd.none)
+        ListGames ->
+            ({ model | menuPane = GameList, gameList = [] }, broadcastIntent (.socket model) msg)
+        ListCategories _ ->
+            ({ model | menuPane = CategoryList, categoryList = [] }, broadcastIntent (.socket model) msg)
         StartSplit i -> -- this should probably be extracted
             let t = .timer model in
                 if Timer.isCompleted (.timer model)
@@ -72,16 +85,27 @@ update msg model =
         _ ->
             ({ model | timer = Timer.update msg <| .timer model }, broadcastIntent (.socket model) msg)
 
+toggleMainMenu : Model -> Model
+toggleMainMenu model = case .activePane model of
+    Splits -> { model | activePane = Menu, menuPane = MainMenu }
+    Menu   -> { model | activePane = Splits }
+
 broadcastIntent : Maybe Socket -> Msg -> Cmd Msg
-broadcastIntent ms msg =
-    case msg of
-        StartSplit t -> send ms <| startSplitAnnounce t
-        Finish timer -> send ms <| finishAnnounce timer
-        Unsplit t    -> send ms <| unsplitAnnounce t
-        Skip t       -> send ms <| skipAnnounce t
-        Stop t       -> send ms <| stopAnnounce t
-        Reset        -> send ms    resetAnnounce
-        _            -> Cmd.none
+broadcastIntent ms msg = case msg of
+    -- Splits controls
+    StartSplit t     -> send ms <| startSplitAnnounce t
+    Finish timer     -> send ms <| finishAnnounce timer
+    Unsplit t        -> send ms <| unsplitAnnounce t
+    Skip t           -> send ms <| skipAnnounce t
+    Stop t           -> send ms <| stopAnnounce t
+    Reset            -> send ms    resetAnnounce
+    -- Menu/navigation
+    ListGames        -> send ms    gameListRequest
+    ListCategories g -> case g of
+        Nothing -> Cmd.none
+        Just g_ -> send ms <| categoryListRequest g_
+    -- Anything not explicitly matched can be safely ignored
+    _                -> Cmd.none
 
 startSplitAnnounce : Int -> JE.Value
 startSplitAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
@@ -128,16 +152,64 @@ resetAnnounce = JE.object [ ( "tag", JE.string "TimerControl" )
                           , ( "contents", JE.object [ ( "tag", JE.string "RemoteReset" ) ] )
                           ]
 
+gameListRequest : JE.Value
+gameListRequest = JE.object [ ( "tag", JE.string "Menu" )
+                            , ( "contents", JE.object [ ( "tag", JE.string "MenuGames" ) ] )
+                            ]
+
+categoryListRequest : Int -> JE.Value
+categoryListRequest game = JE.object [ ( "tag", JE.string "Menu" )
+                                     , ( "contents", JE.object [ ( "tag", JE.string "MenuCategories")
+                                                               , ( "contents", JE.int game )
+                                                               ]
+                                       )
+                                     ]
+
+-- INCOMING MESSAGE PROCESSING
+
+checkTag : String -> JD.Decoder a -> JD.Decoder a
+checkTag target da = checkTag_ (JD.at [ "data", "tag" ] JD.string) target da
+
+checkTag2 : String -> JD.Decoder a -> JD.Decoder a
+checkTag2 target da = checkTag_ (JD.at [ "data", "contents", "tag" ] JD.string) target da
+
+checkTag_ : JD.Decoder String -> String -> JD.Decoder a -> JD.Decoder a
+checkTag_ ds target da =
+    ds |> JD.andThen (\s -> if s == target then da else JD.fail ("No match on " ++ s))
+
 processData : Model -> JE.Value -> Model
 processData model data =
     case processIncomingEvent data of
-        Ok (TimeSync response) -> processTimeSync model response
-        Ok (SplitsControl ctl) -> { model | timer = Timer.update (remoteControl ctl) (.timer model) }
-        x                      -> model
+        Ok (TimeSync response)        -> processTimeSync model response
+        Ok (SplitsControl ctl)        -> { model | timer = Timer.update (remoteControl ctl) (.timer model) }
+        Ok (FetchedGameList games)    -> { model | gameList = games }
+        Ok (FetchedCategoryList cats) -> { model | categoryList = cats }
+        x                             -> model
 
 processIncomingEvent : JE.Value -> Result JD.Error WebsocketMessage
 processIncomingEvent =
-        JD.decodeValue <| JD.oneOf [ timeSyncResponseDecoder, splitsControlDecoder ]
+        JD.decodeValue <| JD.oneOf [ timeSyncResponseDecoder, splitsControlDecoder, gameListDecoder, categoryListDecoder ]
+
+gameListDecoder : JD.Decoder WebsocketMessage
+gameListDecoder =
+    checkTag "GameList" <| JD.map FetchedGameList
+        ( JD.at [ "data", "contents" ] <| JD.list
+            ( JD.map4 TT.Game ( JD.at [ "gameID" ] <| JD.maybe JD.int )
+                              ( JD.at [ "gameData", "gameName" ] JD.string )
+                              ( JD.at [ "gameData", "gameIcon" ] <| JD.maybe JD.string )
+                              ( JD.at [ "gameData", "gameDefaultOffset" ] JD.int )
+            )
+        )
+
+categoryListDecoder : JD.Decoder WebsocketMessage
+categoryListDecoder =
+    checkTag "CategoryList" <| JD.map FetchedCategoryList
+        ( JD.at [ "data", "contents" ] <| JD.list
+            ( JD.map3 TT.Category ( JD.at [ "categoryID" ] <| JD.maybe JD.int )
+                                  ( JD.at [ "categoryData", "categoryName" ] JD.string )
+                                  ( JD.at [ "categoryData", "categoryOffset" ] JD.int )
+            )
+        )
 
 timeSyncResponseDecoder : JD.Decoder WebsocketMessage
 timeSyncResponseDecoder =
@@ -163,16 +235,6 @@ decodeRemoteStop = checkTag "RemoteControl" <| checkTag2 "RemoteStop" (JD.map Sp
 decodeRemoteReset : JD.Decoder WebsocketMessage
 decodeRemoteReset = checkTag "RemoteControl" <| checkTag2 "RemoteReset" (JD.map SplitsControl (JD.succeed RemoteReset))
 
-checkTag : String -> JD.Decoder a -> JD.Decoder a
-checkTag target da = checkTag_ (JD.at [ "data", "tag" ] JD.string) target da
-
-checkTag2 : String -> JD.Decoder a -> JD.Decoder a
-checkTag2 target da = checkTag_ (JD.at [ "data", "contents", "tag" ] JD.string) target da
-
-checkTag_ : JD.Decoder String -> String -> JD.Decoder a -> JD.Decoder a
-checkTag_ ds target da =
-    ds |> JD.andThen (\s -> if s == target then da else JD.fail ("No match on " ++ s))
-
 processTimeSync : Model -> TimeSyncResponse -> Model
 processTimeSync model response = { model | timeOffset = Timer.processSyncResponse (.timer model) response }
 
@@ -195,42 +257,68 @@ subscriptions _ = Sub.batch [ WS.subscriptions
 li : String -> Html Msg
 li string = Html.li [] [Html.text string]
 
-timerView model =
-    case .activePane model of
-        Splits -> Html.div [ HA.id "timer-top" ]
-                           [ Timer.view <| .timer model ]
-        Menu -> Html.div [ HA.id "timer-top" ]
-                         [ Timer.edit <| .timer model ]
+timerView : Model -> Html Msg
+timerView model = case .activePane model of
+    Splits -> Html.div [ HA.id "timer-top" ]
+                       [ Timer.view <| .timer model ]
+    Menu -> Html.div [ HA.id "timer-top" ]
+                     [ Timer.edit <| .timer model ]
 
-menuContainer : TimerPane -> Html Msg
-menuContainer state = case state of
-    Splits -> Html.div [ HA.id "menu-container" ]
-                       [ Html.div [ HA.class "menu-button"
-                                  , HE.onClick SplitsMenu
-                                  ]
-                                  [ Html.text "☰" ]
-                       ]
-    Menu   -> Html.div [ HA.id "menu-container" ]
-                       [ Html.div [ HA.class "menu-button"
-                                  , HE.onClick SplitsMenu
-                                  ]
-                                  [ Html.text "☰" ]
-                       , Html.div [ HA.class "menu-button"
-                                  , HE.onClick CloseSplits
-                                  ]
-                                  [ Html.text "New" ]
-                       , Html.div [ HA.class "menu-button"
-                                  , HE.onClick ListSplits
-                                  ]
-                                  [ Html.text "Load" ]
-                       ]
+menuView : Model -> Html Msg
+menuView model = case .menuPane model of
+    MainMenu ->
+        Html.div [ HA.id "menu-top" ]
+                 [ Html.div [ HA.class "menu-button"
+                            , HE.onClick ListGames
+                            ]
+                            [ Html.text "Load Game" ]
+                 ]
+    GameList ->
+        Html.div [ HA.id "menu-top" ]
+                 [ Html.div [ HA.class "menu-button" ]
+                            (List.map gameListView <| .gameList model)
+                 ]
+    CategoryList ->
+        Html.div [ HA.id "menu-top" ]
+                 [ Html.div [ HA.class "menu-button" ]
+                            (List.map categoryListView <| .categoryList model)
+                 ]
 
+gameListView : TT.Game -> Html Msg
+gameListView game =
+    Html.div [ HA.class "menu-button"
+             , HE.onClick <| ListCategories (.entityID game)
+             ]
+             [ Html.text <| .name game ]
+
+categoryListView : TT.Category -> Html Msg
+categoryListView cat =
+    Html.div [ HA.class "menu-button"
+             --, HE.onClick <| ListCategories (.entityID game)
+             ]
+             [ Html.text <| .name cat ]
+
+menuButton : Html Msg
+menuButton = Html.div [ HA.id "menu-container" ]
+                      [ Html.div [ HA.class "menu-button"
+                                 , HE.onClick ToggleMainMenu
+                                 ]
+                                 [ Html.text "☰" ]
+                      ]
 
 view : Model -> Html Msg
-view model =
-    Html.div [ HA.id "main-container" ]
-             [ Html.div [ HA.id "app-top" ]
-                        [ timerView model
-                        ]
-             , menuContainer <| .activePane model
-             ]
+view model = case .activePane model of
+    Splits ->
+        Html.div [ HA.id "main-container" ]
+                 [ Html.div [ HA.id "app-top" ]
+                            [ timerView model
+                            ]
+                 , menuButton
+                 ]
+    Menu ->
+        Html.div [ HA.id "main-container" ]
+                 [ Html.div [ HA.id "app-top" ]
+                            [ menuView model
+                            ]
+                 , menuButton
+                 ]

@@ -1,6 +1,6 @@
 module Types exposing (..)
 
-import Timer.Types exposing ( Timer )
+import Timer.Types exposing ( Timer, Game, Category )
 
 import Json.Encode as JE
 import Time        as T
@@ -17,8 +17,9 @@ type Msg = OpenSocket String
          | SocketNotOpened
          | SocketReceived JE.Value
          -- Top-level app navigation
-         | SplitsMenu
-         | ListSplits
+         | ToggleMainMenu
+         | ListGames
+         | ListCategories (Maybe Int)
          | CloseSplits
          -- Timer Controls
          | StartSplit Int
@@ -33,6 +34,8 @@ type Msg = OpenSocket String
 
 type WebsocketMessage = TimeSync TimeSyncResponse
                       | SplitsControl SplitsMessage
+                      | FetchedGameList (List Game)
+                      | FetchedCategoryList (List Category)
 
 type alias TimeSyncResponse = { currentTime : Int
                               , previousOffset : Int
