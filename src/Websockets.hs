@@ -18,6 +18,7 @@ import qualified Data.Maybe                     as Maybe
 import qualified Data.Text                      as Text
 import qualified Data.Aeson                     as JSON
 import qualified Data.Time.Clock.POSIX          as Clock
+import qualified Data.Time                      as Time
 
 import qualified Network.WebSockets             as WS
 
@@ -130,13 +131,22 @@ processCommand (Message.TimerControl (Message.RemoteReset)) clientId stateRef = 
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteFinish s)) clientId stateRef = do
+    _ <- saveRun s
+    newSplits <- loadSplits $ Message.runCategory s
     liftIO $ sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
+    liftIO $ sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
     return ackResponse
 
-processCommand (Message.Menu Message.MenuGames) clientId stateRef = do
-    gameList >>= return
-processCommand (Message.Menu (Message.MenuCategories i)) clientId stateRef = do
-    categoryList i >>= return
+processCommand (Message.Menu Message.MenuCloseSplits) clientId stateRef = do
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ closeSplits
+    return ackResponse
+processCommand (Message.Menu Message.MenuGames) _ stateRef = gameList
+processCommand (Message.Menu (Message.MenuCategories i)) clientId stateRef = categoryList i
+
+processCommand (Message.Menu (Message.MenuLoadSplits c)) clientId stateRef = do
+    newSplits <- loadSplits c
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
+    return newSplits
 
 processCommand _ _ _ = return unsupportedResponse
 
@@ -161,6 +171,9 @@ ackResponse = Message.Raw { Message.respType = "ack", Message.respData = "[]" }
 unsupportedResponse :: Message.Response
 unsupportedResponse = Message.Raw { Message.respType = "UnsupportedCommand", Message.respData = "[]" }
 
+closeSplits :: Message.Response
+closeSplits = Message.CloseSplits
+
 gameList :: DB.DBPoolM Message.Response
 gameList = do
     games <- DB.run $ SQL.selectList [] [] :: DB.DBPoolM [SQL.Entity Model.Game]
@@ -182,3 +195,75 @@ categoryList' c = do
     let cat = entityVal c
         cid = fromIntegral . SQL.fromSqlKey . entityKey $ c
       in Message.Category cid cat
+
+loadSplits :: Int -> DB.DBPoolM Message.Response
+loadSplits cid = do
+    category <- DB.run $ SQL.selectList [ Model.CategoryId ==. (SQL.toSqlKey $ fromIntegral cid) ] []
+    loaded <- loadSplits' category
+    return $ Message.SplitsRefresh loaded
+
+loadSplits' :: [SQL.Entity Model.Category] -> DB.DBPoolM (Maybe Message.LoadedSplits)
+loadSplits' [] = return Nothing
+loadSplits' (c:_) = do
+    let cat  = entityVal c
+        cid  = fromIntegral . SQL.fromSqlKey . entityKey $ c
+        game = Model.categoryGame cat
+    games <- DB.run $ SQL.selectList [ Model.GameId ==. game ] []
+    loaded <- loadSplits'' games cid cat
+    return loaded
+
+loadSplits'' :: [SQL.Entity Model.Game] -> Int -> Model.Category -> DB.DBPoolM (Maybe Message.LoadedSplits)
+loadSplits'' [] _ _ = return Nothing
+loadSplits'' (g:_) cid cat = do
+    let game = entityVal g
+        gid  = fromIntegral . SQL.fromSqlKey . entityKey $ g
+    segments <- DB.run $ SQL.selectList [ Model.SegmentCategory ==. (SQL.toSqlKey $ fromIntegral cid) ] []
+    segments' <- mapM segmentData segments
+    return $ Just $ Message.LoadedSplits gid game cid cat segments'
+
+-- This is N+1 as heck and it's gross and bad and I hate it, but I want it
+-- working before I worry about making it not awful.
+-- TODO: Fix N+1.  N+1 is not good for your soul.
+segmentData :: SQL.Entity Model.Segment -> DB.DBPoolM Message.SegmentData
+segmentData s = do
+    let segment = entityVal s
+        skey = entityKey s
+        sid = fromIntegral . SQL.fromSqlKey $ skey
+        name = Model.segmentName segment
+        icon = Model.segmentIcon segment
+    pbRun  <- DB.run $ SQL.selectList [ Model.AttemptCompleted ==. True ] [ SQL.Asc Model.AttemptRealTime, SQL.LimitTo 1 ]
+    pbSegment <- segmentDataPB pbRun skey
+    record <- DB.run $ SQL.selectList [ Model.SplitSegment ==. skey ] [ SQL.Asc Model.SplitElapsed ]
+    let gold  = fmap (Model.splitElapsed . entityVal) (Maybe.listToMaybe record)
+        worst = fmap (Model.splitElapsed . entityVal) (Maybe.listToMaybe . List.reverse $ record)
+        avg   = case fmap (Model.splitElapsed . entityVal) record of
+                  []     -> Nothing
+                  (x:xs) -> Just $ (List.foldl' (+) x xs) `div` (1 + (length xs))
+    return $ Message.SegmentData sid name icon pbSegment gold avg worst
+
+segmentDataPB [] _ = return Nothing
+segmentDataPB (run:_) skey = do
+    segment <- DB.run $ SQL.selectList [ Model.SplitAttempt ==. (entityKey run) ] []
+    return $ case null segment of
+      True -> Nothing
+      False -> Just . Model.splitElapsed . entityVal $ head segment
+
+saveRun :: Message.SplitSet -> DB.DBPoolM ()
+saveRun splitSet = do
+    let c       = SQL.toSqlKey . fromIntegral $ Message.runCategory splitSet
+        s       = millisToUTCTime . Message.startTime $ splitSet
+        e       = millisToUTCTime . Message.endTime $ splitSet
+        r       = Message.realTime splitSet
+        attempt = Model.Attempt c s False e False r True -- TODO: BUG: Fix NTP syncing for this
+    attemptID <- DB.run $ SQL.insert attempt
+    mapM_ (saveSegment attemptID) (Message.segments splitSet)
+    return ()
+
+saveSegment :: Model.Key Model.Attempt -> Message.SegmentTime -> DB.DBPoolM ()
+saveSegment aid st =
+    let segment = SQL.toSqlKey . fromIntegral $ Message.segment st
+        split   = Model.Split aid segment (Message.time st)
+    in DB.run $ SQL.insert_ split
+
+millisToUTCTime :: Int -> Time.UTCTime
+millisToUTCTime time = Clock.posixSecondsToUTCTime $ (fromIntegral time) / 1000

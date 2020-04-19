@@ -52,6 +52,7 @@ Attempt
     endTime     UTCTime
     endSynced   Bool
     realTime    Int
+    completed   Bool
     deriving Show Generic
 
 Split

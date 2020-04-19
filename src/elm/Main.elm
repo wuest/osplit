@@ -69,6 +69,10 @@ update msg model =
             (processData model data, Cmd.none)
         SyncTime _ ->
             (model, send (.socket model) (Timer.syncRequest (.timer model)))
+        CloseSplits ->
+            ({ model | activePane = Splits, timer = Timer.empty }, broadcastIntent (.socket model) msg)
+        LoadSplits _ ->
+            ({ model | activePane = Splits }, broadcastIntent (.socket model) msg)
         ToggleMainMenu ->
             (toggleMainMenu model, Cmd.none)
         ListGames ->
@@ -100,10 +104,15 @@ broadcastIntent ms msg = case msg of
     Stop t           -> send ms <| stopAnnounce t
     Reset            -> send ms    resetAnnounce
     -- Menu/navigation
+    CloseSplits      -> send ms    closeSplitsRequest
     ListGames        -> send ms    gameListRequest
     ListCategories g -> case g of
         Nothing -> Cmd.none
         Just g_ -> send ms <| categoryListRequest g_
+    -- Load/editmanipulate splits
+    LoadSplits c     -> case c of
+        Nothing -> Cmd.none
+        Just c_ -> send ms <| splitsLoadRequest c_
     -- Anything not explicitly matched can be safely ignored
     _                -> Cmd.none
 
@@ -152,6 +161,11 @@ resetAnnounce = JE.object [ ( "tag", JE.string "TimerControl" )
                           , ( "contents", JE.object [ ( "tag", JE.string "RemoteReset" ) ] )
                           ]
 
+closeSplitsRequest : JE.Value
+closeSplitsRequest = JE.object [ ( "tag", JE.string "Menu" )
+                               , ( "contents", JE.object [ ( "tag", JE.string "MenuCloseSplits" ) ] )
+                               ]
+
 gameListRequest : JE.Value
 gameListRequest = JE.object [ ( "tag", JE.string "Menu" )
                             , ( "contents", JE.object [ ( "tag", JE.string "MenuGames" ) ] )
@@ -165,6 +179,14 @@ categoryListRequest game = JE.object [ ( "tag", JE.string "Menu" )
                                        )
                                      ]
 
+splitsLoadRequest : Int -> JE.Value
+splitsLoadRequest category = JE.object [ ( "tag", JE.string "Menu" )
+                                       , ( "contents", JE.object [ ( "tag", JE.string "MenuLoadSplits")
+                                                                 , ( "contents", JE.int category )
+                                                                 ]
+                                         )
+                                       ]
+
 -- INCOMING MESSAGE PROCESSING
 
 checkTag : String -> JD.Decoder a -> JD.Decoder a
@@ -175,20 +197,32 @@ checkTag2 target da = checkTag_ (JD.at [ "data", "contents", "tag" ] JD.string) 
 
 checkTag_ : JD.Decoder String -> String -> JD.Decoder a -> JD.Decoder a
 checkTag_ ds target da =
-    ds |> JD.andThen (\s -> if s == target then da else JD.fail ("No match on " ++ s))
+    ds |> JD.andThen (\s -> if s == target then da else JD.fail ("No match on tag:" ++ s))
 
 processData : Model -> JE.Value -> Model
 processData model data =
     case processIncomingEvent data of
         Ok (TimeSync response)        -> processTimeSync model response
         Ok (SplitsControl ctl)        -> { model | timer = Timer.update (remoteControl ctl) (.timer model) }
+        Ok (UnloadSplits)             -> { model | timer = Timer.empty }
         Ok (FetchedGameList games)    -> { model | gameList = games }
         Ok (FetchedCategoryList cats) -> { model | categoryList = cats }
-        x                             -> model
+        Ok (FetchedSplits Nothing)    -> model -- TODO: ERROR HANDLE THIS
+        Ok (FetchedSplits (Just s))   -> { model | timer = Timer.load s }
+        x                             -> model -- TODO: ESPECIALLY ERROR HANDLE THIS
 
 processIncomingEvent : JE.Value -> Result JD.Error WebsocketMessage
 processIncomingEvent =
-        JD.decodeValue <| JD.oneOf [ timeSyncResponseDecoder, splitsControlDecoder, gameListDecoder, categoryListDecoder ]
+        JD.decodeValue <| JD.oneOf [ timeSyncResponseDecoder
+                                   , splitsControlDecoder
+                                   , gameListDecoder
+                                   , categoryListDecoder
+                                   , splitsDecoder
+                                   , closeSplitsDecoder
+                                   ]
+
+closeSplitsDecoder : JD.Decoder WebsocketMessage
+closeSplitsDecoder = checkTag "CloseSplits" <| JD.map (\_ -> UnloadSplits) ( JD.at [ "data", "tag" ] JD.string )
 
 gameListDecoder : JD.Decoder WebsocketMessage
 gameListDecoder =
@@ -210,6 +244,40 @@ categoryListDecoder =
                                   ( JD.at [ "categoryData", "categoryOffset" ] JD.int )
             )
         )
+
+splitsDecoder : JD.Decoder WebsocketMessage
+splitsDecoder =
+    checkTag "SplitsRefresh" <| JD.map FetchedSplits
+        ( JD.at [ "data", "contents" ] <| JD.nullable
+            ( JD.map3 TT.SplitsSpec newGameDecoder newCategoryDecoder newSegmentListDecoder )
+        )
+
+newGameDecoder : JD.Decoder TT.Game
+newGameDecoder =
+    JD.map4 TT.Game ( JD.at [ "splitSetGameID" ] <| JD.maybe JD.int )
+                    ( JD.at [ "splitSetGameData", "gameName" ] JD.string )
+                    ( JD.at [ "splitSetGameData", "gameIcon" ] <| JD.nullable JD.string )
+                    ( JD.at [ "splitSetGameData", "gameDefaultOffset" ] JD.int )
+
+newCategoryDecoder : JD.Decoder TT.Category
+newCategoryDecoder =
+    JD.map3 TT.Category ( JD.at [ "splitSetCategoryID" ] <| JD.maybe JD.int )
+                        ( JD.at [ "splitSetCategoryData", "categoryName" ] JD.string )
+                        ( JD.at [ "splitSetCategoryData", "categoryOffset" ] JD.int )
+
+newSegmentListDecoder : JD.Decoder TT.SplitSet
+newSegmentListDecoder = JD.at [ "splitSetSegments" ] <| JD.list <|
+    JD.map (\x -> TT.Split x Nothing Nothing) ( newSegmentDecoder )
+
+newSegmentDecoder : JD.Decoder TT.Segment
+newSegmentDecoder = 
+    JD.map7 TT.Segment ( JD.at [ "segmentID" ] <| JD.maybe JD.int )
+                       ( JD.at [ "segmentName" ] JD.string )
+                       ( JD.at [ "segmentIcon" ] <| JD.nullable JD.string )
+                       ( JD.at [ "segmentPB" ] <| JD.nullable JD.int )
+                       ( JD.at [ "segmentGold" ] <| JD.nullable JD.int )
+                       ( JD.at [ "segmentAverage" ] <| JD.nullable JD.int )
+                       ( JD.at [ "segmentWorst" ] <| JD.nullable JD.int )
 
 timeSyncResponseDecoder : JD.Decoder WebsocketMessage
 timeSyncResponseDecoder =
@@ -272,15 +340,19 @@ menuView model = case .menuPane model of
                             , HE.onClick ListGames
                             ]
                             [ Html.text "Load Game" ]
+                 , Html.div [ HA.class "menu-button"
+                            , HE.onClick CloseSplits
+                            ]
+                            [ Html.text "Close Game" ]
                  ]
     GameList ->
         Html.div [ HA.id "menu-top" ]
-                 [ Html.div [ HA.class "menu-button" ]
+                 [ Html.div [ ]
                             (List.map gameListView <| .gameList model)
                  ]
     CategoryList ->
         Html.div [ HA.id "menu-top" ]
-                 [ Html.div [ HA.class "menu-button" ]
+                 [ Html.div [ ]
                             (List.map categoryListView <| .categoryList model)
                  ]
 
@@ -294,7 +366,7 @@ gameListView game =
 categoryListView : TT.Category -> Html Msg
 categoryListView cat =
     Html.div [ HA.class "menu-button"
-             --, HE.onClick <| ListCategories (.entityID game)
+             , HE.onClick <| LoadSplits (.entityID cat)
              ]
              [ Html.text <| .name cat ]
 

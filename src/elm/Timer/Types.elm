@@ -62,3 +62,8 @@ type alias TimeSum = { pb : Int
                      , worst : Int
                      , current : Int
                      }
+
+type alias SplitsSpec = { game : Game
+                        , category : Category
+                        , segments : SplitSet
+                        }

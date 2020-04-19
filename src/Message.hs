@@ -24,6 +24,8 @@ data SplitsCommand = RemoteStartSplit Int
 
 data MenuCommand = MenuGames
                  | MenuCategories Int
+                 | MenuLoadSplits Int
+                 | MenuCloseSplits
     deriving ( Show, Generic )
 
 data Command = TimeSyncInit TimeState
@@ -31,7 +33,12 @@ data Command = TimeSyncInit TimeState
              | Menu MenuCommand
     deriving ( Show, Generic )
 
-type SplitSet = [SegmentTime]
+data SplitSet = SplitSet { runCategory :: Int
+                         , segments    :: [SegmentTime]
+                         , startTime   :: Int
+                         , endTime     :: Int
+                         , realTime    :: Int
+                         } deriving ( Show, Generic )
 
 data SegmentTime = SegmentTime { segment :: Int
                                , time    :: Int
@@ -52,7 +59,25 @@ data Response = Raw { respType :: Text.Text
               | RemoteControl SplitsCommand
               | GameList [Game]
               | CategoryList [Category]
+              | SplitsRefresh (Maybe LoadedSplits)
+              | CloseSplits
               deriving ( Show, Generic )
+
+data SegmentData = SegmentData { segmentID      :: Int
+                               , segmentName    :: Text.Text
+                               , segmentIcon    :: Maybe Text.Text
+                               , segmentPB      :: Maybe Int
+                               , segmentGold    :: Maybe Int
+                               , segmentAverage :: Maybe Int
+                               , segmentWorst   :: Maybe Int
+                               } deriving ( Show, Generic )
+
+data LoadedSplits = LoadedSplits { splitSetGameID :: Int
+                                 , splitSetGameData :: Model.Game
+                                 , splitSetCategoryID :: Int
+                                 , splitSetCategoryData :: Model.Category
+                                 , splitSetSegments :: [SegmentData]
+                                 } deriving ( Show, Generic )
 
 instance JSON.FromJSON SplitsCommand
 instance JSON.ToJSON SplitsCommand
@@ -69,3 +94,9 @@ instance JSON.FromJSON Category
 instance JSON.ToJSON Category
 instance JSON.FromJSON Game
 instance JSON.ToJSON Game
+instance JSON.FromJSON SplitSet
+instance JSON.ToJSON SplitSet
+instance JSON.FromJSON SegmentData
+instance JSON.ToJSON SegmentData
+instance JSON.FromJSON LoadedSplits
+instance JSON.ToJSON LoadedSplits

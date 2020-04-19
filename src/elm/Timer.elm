@@ -1,6 +1,6 @@
 module Timer exposing ( Timer
                       , empty, start, stop, reset
-                      , edit, view, subscriptions, update
+                      , edit, view, subscriptions, update, load
                       , syncRequest, processSyncResponse, toJSON
                       , isCompleted
                       )
@@ -23,15 +23,31 @@ type alias Timer = Timer.Types.Timer
 
 {- BASE TIMER FUNCTIONS -}
 empty : Timer
-empty = Stopped { started   = zero
-                , current   = zero
-                , elapsed   = 0
-                , game      = noGame
-                , category  = noCategory
-                , passed    = noSplits
-                , split     = noSplit
-                , remaining = noSplits
-                }
+empty = Stopped empty_
+
+empty_ : Splits
+empty_ = { started   = zero
+         , current   = zero
+         , elapsed   = 0
+         , game      = noGame
+         , category  = noCategory
+         , passed    = noSplits
+         , split     = noSplit
+         , remaining = noSplits
+         }
+
+load : SplitsSpec -> Timer
+load newSplits =
+    let s     = List.head <| .segments newSplits
+        rest_ = List.tail <| .segments newSplits
+        rest  = case rest_ of
+            Nothing -> []
+            Just r  -> r
+    in Stopped { empty_ | game = .game newSplits
+                        , category = .category newSplits
+                        , split = s
+                        , remaining = rest
+               }
 
 elapsed : Timer -> Int
 elapsed t = case t of
@@ -409,13 +425,13 @@ subscriptions = Sub.batch [ T.every 1 Tick
 update : Msg -> Timer -> Timer
 update msg t = case msg of
     StartSplit i -> start t i
-    Unsplit _          -> unsplit t
-    Skip _             -> skip t
-    Stop _             -> stop t
-    Reset              -> reset t
-    Tick tick          -> setTime t tick
-    CloseSplits        -> empty
-    _                  -> t
+    Unsplit _    -> unsplit t
+    Skip _       -> skip t
+    Stop _       -> stop t
+    Reset        -> reset t
+    Tick tick    -> setTime t tick
+    CloseSplits  -> empty
+    _            -> t
 
 {- TIME SYNC -}
 syncRequest : Timer -> JE.Value
@@ -442,23 +458,35 @@ toJSON t =
     let pull ms = case ms of
             Nothing -> []
             Just js -> [js]
-        p = .passed <| splitsFor t
-        s = pull (.split <| splitsFor t)
-        r = .remaining <| splitsFor t
+        cat = case (splitsFor >> .category >> .entityID) t of
+            Nothing -> JE.null
+            Just c  -> JE.int c
+        splits = splitsFor t
+        p = .passed splits
+        s = pull <| .split splits
+        r = .remaining splits
         allSplits =  p ++ s ++ r
+        startTime = (.started >> millis) splits
+        realTime  = elapsed t
+        endTime   = startTime + realTime
     in
-        JE.list toJSON_ <| List.filter (\x -> (.entityID <| .segment x) /= Nothing) allSplits
+        JE.object [ ( "runCategory", cat )
+                  , ( "segments", JE.list segmentsJSON <| List.filter (\x -> (.entityID <| .segment x) /= Nothing) allSplits )
+                  , ( "startTime", JE.int startTime )
+                  , ( "realTime", JE.int realTime )
+                  , ( "endTime", JE.int endTime )
+                  ]
 
-toJSON_ : Split -> JE.Value
-toJSON_ s =
+segmentsJSON : Split -> JE.Value
+segmentsJSON s =
     case .entityID <| .segment s of
         Just i  -> JE.object [ ("segment", JE.int i)
-                             , ("time", toJSON__ <| .time s)
+                             , ("time", segmentsJSON_ <| .time s)
                              ]
         Nothing -> JE.null -- unreachable
 
-toJSON__ : Maybe Int -> JE.Value
-toJSON__ x =
+segmentsJSON_ : Maybe Int -> JE.Value
+segmentsJSON_ x =
     case x of
         Just y  -> JE.int y
         Nothing -> JE.null
