@@ -233,25 +233,7 @@ timerClass : Timer -> String
 timerClass t =
     case t of
         Stopped s -> if elapsed t == 0 then "neutral" else timerClass_ s <| elapsed t
-        Running s ->
-            case .split s of
-                Nothing -> "neutral"
-                Just s_ ->
-                    let elapsedTime = (.elapsed s) + ((millis <| .current s) - (millis <| .started s)) -- this is duplicated a few places.  Please fix.
-                        segmentTime = elapsedTime - (List.sum <| List.map (.time >> tfm) (.passed s))
-                        splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), Just -1) -- Gold is set to impossible value
-                        splitChange = timeChange splitStatus segmentTime <| (.segment >> .pb >> tfm) s_
-                    in
-                        case splitChange of
-                            Gaining x ->
-                                case x of
-                                    Behind -> "gaining-behind"
-                                    _ -> "gaining-ahead"
-                            Losing x ->
-                                case x of
-                                    Behind -> "losing-behind"
-                                    _ -> "losing-ahead"
-                            _ -> "impossible"
+        Running s -> timerClass_ s <| elapsed t
 
 timerClass_ : Splits -> Int -> String
 timerClass_ s elapsedTime =
@@ -261,7 +243,7 @@ timerClass_ s elapsedTime =
                 Nothing -> "neutral"
                 Just s_ ->
                     let segmentTime = elapsedTime - (List.sum <| List.map (.time >> tfm) (.passed s))
-                        splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), Just -1) -- Gold is set to impossible value
+                        splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), (.segment >> .gold) s_)
                         splitChange = timeChange splitStatus segmentTime <| (.segment >> .pb >> tfm) s_
                     in
                         case splitChange of
@@ -276,7 +258,7 @@ timerClass_ s elapsedTime =
                             _ -> "impossible"
         Just s_ ->
             let segmentTime = elapsedTime - (List.sum <| List.map (.time >> tfm) (.passed s))
-                splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), Just -1) -- Gold is set to impossible value
+                splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), (.segment >> .gold) s_)
                 splitChange = timeChange splitStatus segmentTime <| (.segment >> .pb >> tfm) s_
             in
                 case splitChange of
@@ -312,7 +294,7 @@ splitsList : Timer -> H.Html Msg
 splitsList t =
     let s = splitsFor t
         r = elapsed t
-        initSum = { pb = 0, gold = 0, average = 0, worst = 0, current = 0 }
+        initSum = { pb = 0, gold = Just 0, average = 0, worst = 0, current = 0 }
         (n, times, hs) = List.foldl (splitsList_ Previous r) (0, initSum, []) (.passed s)
         currentStatus = case t of Running _ -> Current
                                   Stopped _ -> Upcoming
@@ -329,7 +311,7 @@ splitsList t =
 splitsList_ : Position -> Int -> Split -> SplitsListAccumulator -> SplitsListAccumulator
 splitsList_ relativePosition runningTime thisSplit (n, times, hs) =
     let pb   = tfm <| (.segment >> .pb) thisSplit
-        g    = tfm <| (.segment >> .gold) thisSplit
+        g    =        (.segment >> .gold) thisSplit
         a    = tfm <| (.segment >> .average) thisSplit
         w    = tfm <| (.segment >> .worst) thisSplit
         s    = tfm <| .time thisSplit
@@ -337,7 +319,7 @@ splitsList_ relativePosition runningTime thisSplit (n, times, hs) =
         icon = (.segment >> .icon) thisSplit
         pos  = String.fromInt n
         nt   = { times | pb = (.pb times) + pb
-               ,         gold = (.gold times) + g
+               ,         gold = liftA2 (+) (.gold times) g
                ,         average = (.average times) + a
                ,         worst = (.worst times) + w
                ,         current = (.current times) + s
@@ -360,13 +342,13 @@ splitsList_ relativePosition runningTime thisSplit (n, times, hs) =
                          _ ->
                              [ H.div [ Attr.id <| "split-" ++ pos ++ "-name", Attr.class "split-name" ] [ H.text <| (.segment >> .name) thisSplit ]
                              , runningDiv pos "pb" <| conditionalOffset relativePosition pb s
-                             , runningDiv pos "gold" <| conditionalOffset relativePosition g s
+                             , runningDiv pos "gold" <| conditionalOffsetM relativePosition g s
                              , runningDiv pos "average" <| conditionalOffset relativePosition a s
                              , runningDiv pos "worst" <| conditionalOffset relativePosition w s
                              , runningDiv pos "split" <| show_ 2 s False
 
                              , runningDiv pos "running-pb" <| conditionalOffset relativePosition (.pb nt) (.current nt)
-                             , runningDiv pos "running-gold" <| conditionalOffset relativePosition (.gold nt) (.current nt)
+                             , runningDiv pos "running-gold" <| conditionalOffsetM relativePosition (.gold nt) (.current nt)
                              , runningDiv pos "running-average" <| conditionalOffset relativePosition (.average nt) (.current nt)
                              , runningDiv pos "running-worst" <| conditionalOffset relativePosition (.worst nt) (.current nt)
                              , runningDiv pos "running-current" <| conditionalOffset_ relativePosition (.current nt) runningTime
@@ -392,7 +374,8 @@ changeDisplay maybeChange =
                 Losing x ->
                     case x of
                         Behind -> [("behind-split", True), ("losing-split", True)]
-                        _ -> [("ahead-split", True), ("losing-split", True)] -- Pattern match everything; gold is impossible here.
+                        Ahead -> [("ahead-split", True), ("losing-split", True)]
+                        Gold -> [("gold-split", True), ("gaining-split", True)] -- This occurs when there is no gold for the split
                 Skipped -> [("skipped-split", True)]
 
 conditionalOffset : Position -> Int -> Int -> H.Html Msg
@@ -408,9 +391,15 @@ conditionalOffset_ pos segmentTime runningTime =
         Current  -> show_ 2 runningTime False
         Previous -> show_ 2 segmentTime False
 
+conditionalOffsetM : Position -> Maybe Int -> Int -> H.Html Msg
+conditionalOffsetM pos segmentTime currentTime =
+    case segmentTime of
+        Nothing -> H.div [] []
+        Just s  -> conditionalOffset pos s currentTime
+
 runningDiv : String -> String -> H.Html Msg -> H.Html Msg
-runningDiv id tag displayTime =
-    H.div [ Attr.id <| "split-" ++ id ++ "-" ++ tag
+runningDiv splitID tag displayTime =
+    H.div [ Attr.id <| "split-" ++ splitID ++ "-" ++ tag
           , Attr.classList [("split-column", True), (tag, True), ("segmentTime", True)]
           ]
           [ displayTime ]
@@ -471,7 +460,7 @@ toJSON t =
         endTime   = startTime + realTime
     in
         JE.object [ ( "runCategory", cat )
-                  , ( "segments", JE.list segmentsJSON <| List.filter (\x -> (.entityID <| .segment x) /= Nothing) allSplits )
+                  , ( "segments", JE.list segmentsJSON <| List.filter (\x -> ((.entityID <| .segment x) /= Nothing) && ((.time x) /= Nothing) ) allSplits )
                   , ( "startTime", JE.int startTime )
                   , ( "realTime", JE.int realTime )
                   , ( "endTime", JE.int endTime )
@@ -489,7 +478,7 @@ segmentsJSON_ : Maybe Int -> JE.Value
 segmentsJSON_ x =
     case x of
         Just y  -> JE.int y
-        Nothing -> JE.null
+        Nothing -> JE.null -- unreachable
 
 {- HELPER FUNCTIONS -}
 millis : Time -> Int
@@ -581,3 +570,12 @@ timeChange status current pb =
     if current <= pb
     then Gaining status
     else Losing status
+
+liftA2 : (a -> b -> c) -> Maybe a -> Maybe b -> Maybe c
+liftA2 f ma mb =
+    case ma of
+        Nothing -> Nothing
+        Just a ->
+            case mb of
+                Nothing -> Nothing
+                Just b -> Just <| f a b

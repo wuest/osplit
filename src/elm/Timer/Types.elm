@@ -57,7 +57,7 @@ type alias Splits = { started   : Time
                     }
 
 type alias TimeSum = { pb : Int
-                     , gold : Int
+                     , gold : Maybe Int
                      , average : Int
                      , worst : Int
                      , current : Int
