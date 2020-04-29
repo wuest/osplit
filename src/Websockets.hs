@@ -243,7 +243,7 @@ segmentData s = do
 
 segmentDataPB [] _ = return Nothing
 segmentDataPB (run:_) skey = do
-    segment <- DB.run $ SQL.selectList [ Model.SplitAttempt ==. (entityKey run) ] []
+    segment <- DB.run $ SQL.selectList [ Model.SplitAttempt ==. (entityKey run), Model.SplitSegment ==. skey ] []
     return $ case null segment of
       True -> Nothing
       False -> Just . Model.splitElapsed . entityVal $ head segment

@@ -310,7 +310,7 @@ splitsList t =
 
 splitsList_ : Position -> Int -> Split -> SplitsListAccumulator -> SplitsListAccumulator
 splitsList_ relativePosition runningTime thisSplit (n, times, hs) =
-    let pb   = tfm <| (.segment >> .pb) thisSplit
+    let pb   =        (.segment >> .pb) thisSplit
         g    =        (.segment >> .gold) thisSplit
         a    = tfm <| (.segment >> .average) thisSplit
         w    = tfm <| (.segment >> .worst) thisSplit
@@ -318,12 +318,13 @@ splitsList_ relativePosition runningTime thisSplit (n, times, hs) =
         name = (.segment >> .name) thisSplit
         icon = (.segment >> .icon) thisSplit
         pos  = String.fromInt n
-        nt   = { times | pb = (.pb times) + pb
+        nt   = { times | pb = (.pb times) + (tfm pb)
                ,         gold = liftA2 (+) (.gold times) g
                ,         average = (.average times) + a
                ,         worst = (.worst times) + w
                ,         current = (.current times) + s
                }
+        cpb  = fmap ((+) (.pb times)) pb
         divContent = case .change thisSplit of
                          Just Skipped ->
                              [ H.div [ Attr.id <| "split-" ++ pos ++ "-name", Attr.class "split-name" ] [ H.text <| (.segment >> .name) thisSplit ]
@@ -341,13 +342,13 @@ splitsList_ relativePosition runningTime thisSplit (n, times, hs) =
                              ]
                          _ ->
                              [ H.div [ Attr.id <| "split-" ++ pos ++ "-name", Attr.class "split-name" ] [ H.text <| (.segment >> .name) thisSplit ]
-                             , runningDiv pos "pb" <| conditionalOffset relativePosition pb s
+                             , runningDiv pos "pb" <| conditionalOffsetM relativePosition pb s
                              , runningDiv pos "gold" <| conditionalOffsetM relativePosition g s
                              , runningDiv pos "average" <| conditionalOffset relativePosition a s
                              , runningDiv pos "worst" <| conditionalOffset relativePosition w s
                              , runningDiv pos "split" <| show_ 2 s False
 
-                             , runningDiv pos "running-pb" <| conditionalOffset relativePosition (.pb nt) (.current nt)
+                             , runningDiv pos "running-pb" <| conditionalOffsetM relativePosition cpb (.current nt)
                              , runningDiv pos "running-gold" <| conditionalOffsetM relativePosition (.gold nt) (.current nt)
                              , runningDiv pos "running-average" <| conditionalOffset relativePosition (.average nt) (.current nt)
                              , runningDiv pos "running-worst" <| conditionalOffset relativePosition (.worst nt) (.current nt)
@@ -570,6 +571,12 @@ timeChange status current pb =
     if current <= pb
     then Gaining status
     else Losing status
+
+fmap : (a -> b) -> Maybe a -> Maybe b
+fmap f ma =
+    case ma of
+        Nothing -> Nothing
+        Just a  -> Just (f a)
 
 liftA2 : (a -> b -> c) -> Maybe a -> Maybe b -> Maybe c
 liftA2 f ma mb =
