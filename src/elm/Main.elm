@@ -102,7 +102,7 @@ broadcastIntent ms msg = case msg of
     Unsplit t        -> send ms <| unsplitAnnounce t
     Skip t           -> send ms <| skipAnnounce t
     Stop t           -> send ms <| stopAnnounce t
-    Reset            -> send ms    resetAnnounce
+    Reset timer      -> send ms <| resetAnnounce timer
     -- Menu/navigation
     CloseSplits      -> send ms    closeSplitsRequest
     ListGames        -> send ms    gameListRequest
@@ -156,10 +156,13 @@ stopAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
                              )
                            ]
 
-resetAnnounce : JE.Value
-resetAnnounce = JE.object [ ( "tag", JE.string "TimerControl" )
-                          , ( "contents", JE.object [ ( "tag", JE.string "RemoteReset" ) ] )
-                          ]
+resetAnnounce : Timer.Timer -> JE.Value
+resetAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
+                            , ( "contents", JE.object [ ( "tag", JE.string "RemoteReset" )
+                                                      , ( "contents", Timer.toJSON t )
+                                                      ]
+                              )
+                            ]
 
 closeSplitsRequest : JE.Value
 closeSplitsRequest = JE.object [ ( "tag", JE.string "Menu" )
@@ -270,7 +273,7 @@ newSegmentListDecoder = JD.at [ "splitSetSegments" ] <| JD.list <|
     JD.map (\x -> TT.Split x Nothing Nothing) ( newSegmentDecoder )
 
 newSegmentDecoder : JD.Decoder TT.Segment
-newSegmentDecoder = 
+newSegmentDecoder =
     JD.map7 TT.Segment ( JD.at [ "segmentID" ] <| JD.maybe JD.int )
                        ( JD.at [ "segmentName" ] JD.string )
                        ( JD.at [ "segmentIcon" ] <| JD.nullable JD.string )
@@ -313,7 +316,7 @@ remoteControl s =
         RemoteUnsplit t    -> Unsplit t
         RemoteSkip t       -> Skip t
         RemoteStop t       -> Stop t
-        RemoteReset        -> Reset
+        RemoteReset        -> Reset Timer.empty
 
 {- SUBSCRIPTIONS -}
 subscriptions : Model -> Sub Msg

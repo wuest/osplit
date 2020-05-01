@@ -127,11 +127,14 @@ processCommand (Message.TimerControl (Message.RemoteSkip i)) clientId stateRef =
 processCommand (Message.TimerControl (Message.RemoteStop i)) clientId stateRef = do
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ stopSplits i
     return ackResponse
-processCommand (Message.TimerControl (Message.RemoteReset)) clientId stateRef = do
+processCommand (Message.TimerControl (Message.RemoteReset s)) clientId stateRef = do
+    _ <- saveRun False s
+    newSplits <- loadSplits $ Message.runCategory s
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
+    liftIO $ sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteFinish s)) clientId stateRef = do
-    _ <- saveRun s
+    _ <- saveRun True s
     newSplits <- loadSplits $ Message.runCategory s
     liftIO $ sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
     liftIO $ sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
@@ -163,7 +166,7 @@ stopSplits :: Int -> Message.Response
 stopSplits i = Message.RemoteControl (Message.RemoteStop i)
 
 reset :: Message.Response
-reset = Message.RemoteControl Message.RemoteReset
+reset = Message.RemoteControl (Message.RemoteReset (Message.SplitSet (negate 1) [] 0 0 0))
 
 ackResponse :: Message.Response
 ackResponse = Message.Raw { Message.respType = "ack", Message.respData = "[]" }
@@ -248,13 +251,13 @@ segmentDataPB (run:_) skey = do
       True -> Nothing
       False -> Just . Model.splitElapsed . entityVal $ head segment
 
-saveRun :: Message.SplitSet -> DB.DBPoolM ()
-saveRun splitSet = do
+saveRun :: Bool -> Message.SplitSet -> DB.DBPoolM ()
+saveRun finished splitSet = do
     let c       = SQL.toSqlKey . fromIntegral $ Message.runCategory splitSet
         s       = millisToUTCTime . Message.startTime $ splitSet
         e       = millisToUTCTime . Message.endTime $ splitSet
         r       = Message.realTime splitSet
-        attempt = Model.Attempt c s False e False r True -- TODO: BUG: Fix NTP syncing for this
+        attempt = Model.Attempt c s False e False r finished -- TODO: BUG: Fix NTP syncing for this
     attemptID <- DB.run $ SQL.insert attempt
     mapM_ (saveSegment attemptID) (Message.segments splitSet)
     return ()

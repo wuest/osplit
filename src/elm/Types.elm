@@ -28,7 +28,7 @@ type Msg = OpenSocket String
          | Unsplit Int
          | Skip Int
          | Stop Int
-         | Reset
+         | Reset Timer
          -- Timer backend
          | Tick T.Posix
          | SyncTime T.Posix

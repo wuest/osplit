@@ -105,10 +105,10 @@ split t i = case t of
 split_ : Splits -> Int -> Timer
 split_ s i =
     case .split s of
-        Nothing -> stop <| Running s
+        Nothing -> stop <| Running s -- Only reachable when no splits are loaded
         Just s_ -> let elapsedTime = (.elapsed s) + ((millis <| .current s) - (millis <| .started s)) -- this is duplicated a few places.  Please fix.
-                       segmentTime = elapsedTime - (List.sum <| List.map (.time >> tfm) (.passed s))
-                       splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), (.segment >> .gold) s_)
+                       segmentTime = i - (List.sum <| List.map (.time >> tfm) (.passed s))
+                       splitStatus = timeStatus (i, segmentTime) (pbSum (List.append (.passed s) [s_]), (.segment >> .gold) s_)
                        splitChange = timeChange splitStatus segmentTime <| (.segment >> .pb >> tfm) s_
                        priorSplit = { s_ | time = Just segmentTime, change = Just splitChange }
                        newPassed = List.append (.passed s) [priorSplit]
@@ -226,7 +226,7 @@ view t =
           , H.button [ Event.onClick <| Unsplit (elapsed t) ] [ H.text "Unsplit" ]
           , H.button [ Event.onClick <| Skip (elapsed t) ] [ H.text "Skip" ]
           , H.button [ Event.onClick <| Stop (elapsed t) ] [ H.text "Stop" ]
-          , H.button [ Event.onClick Reset ] [ H.text "Reset" ]
+          , H.button [ Event.onClick <| Reset t ] [ H.text "Reset" ]
           ]
 
 timerClass : Timer -> String
@@ -418,7 +418,7 @@ update msg t = case msg of
     Unsplit _    -> unsplit t
     Skip _       -> skip t
     Stop _       -> stop t
-    Reset        -> reset t
+    Reset timer  -> reset timer
     Tick tick    -> setTime t tick
     CloseSplits  -> empty
     _            -> t

@@ -19,7 +19,7 @@ data SplitsCommand = RemoteStartSplit Int
                    | RemoteUnsplit Int
                    | RemoteSkip Int
                    | RemoteStop Int
-                   | RemoteReset
+                   | RemoteReset SplitSet
     deriving ( Show, Generic )
 
 data MenuCommand = MenuGames
