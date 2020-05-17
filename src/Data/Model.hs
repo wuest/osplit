@@ -60,6 +60,11 @@ Split
     segment SegmentId
     elapsed Int
     deriving Show Generic
+
+ConfigStore
+    key       Text unique
+    jsonValue Text
+    deriving Show Generic
 |]
 
 instance FromJSON Game
@@ -76,3 +81,6 @@ instance ToJSON Attempt
 
 instance FromJSON Split
 instance ToJSON Split
+
+instance FromJSON ConfigStore
+instance ToJSON ConfigStore

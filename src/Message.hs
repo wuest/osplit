@@ -14,6 +14,9 @@ data TimeState = TimeState { currentTime  :: Int
                            , previousOffset :: Maybe Int
                            } deriving ( Show, Generic )
 
+type ConfigKey = Text.Text
+type ConfigVal = Text.Text
+
 data SplitsCommand = RemoteStartSplit Int
                    | RemoteFinish SplitSet
                    | RemoteUnsplit Int
@@ -29,8 +32,11 @@ data MenuCommand = MenuGames
     deriving ( Show, Generic )
 
 data Command = TimeSyncInit TimeState
+             | NewClient
              | TimerControl SplitsCommand
              | Menu MenuCommand
+             | SetConfig ConfigKey ConfigVal
+             | FetchConfig ConfigKey
     deriving ( Show, Generic )
 
 data SplitSet = SplitSet { runCategory :: Int
@@ -61,6 +67,7 @@ data Response = Raw { respType :: Text.Text
               | CategoryList [Category]
               | SplitsRefresh (Maybe LoadedSplits)
               | CloseSplits
+              | ConfigStore ConfigKey ConfigVal
               deriving ( Show, Generic )
 
 data SegmentData = SegmentData { segmentID      :: Int

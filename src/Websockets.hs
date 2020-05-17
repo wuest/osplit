@@ -34,6 +34,7 @@ import Data.Text.Lazy.Encoding ( decodeUtf8 )
 import Data.Text.Lazy          ( toStrict )
 
 import qualified Message
+import qualified Data.ConfigStore as Store
 
 type ClientId = Int
 type Client   = (ClientId, WS.Connection)
@@ -115,6 +116,13 @@ processCommand (Message.TimeSyncInit timeState) _ _ = do
     now <- liftIO $ round . (1000 *) <$> Clock.getPOSIXTime
     return $ Message.TimeSyncResponse $ Message.TimeState { Message.currentTime = now, Message.previousOffset = Just (now - Message.currentTime timeState) }
 
+processCommand (Message.NewClient) clientId stateRef = do
+    let k = "splits.active_splits"
+    vs <- Store.fetch_ k
+    return $ case vs of
+               []  -> ackResponse
+               v:_ -> Message.ConfigStore k v
+
 processCommand (Message.TimerControl (Message.RemoteStartSplit i)) clientId stateRef = do
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ startSplit i
     return ackResponse
@@ -129,6 +137,7 @@ processCommand (Message.TimerControl (Message.RemoteStop i)) clientId stateRef =
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteReset s)) clientId stateRef = do
     _ <- saveRun False s
+    return $ ackResponse
     newSplits <- loadSplits $ Message.runCategory s
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
     liftIO $ sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
@@ -147,9 +156,20 @@ processCommand (Message.Menu Message.MenuGames) _ stateRef = gameList
 processCommand (Message.Menu (Message.MenuCategories i)) clientId stateRef = categoryList i
 
 processCommand (Message.Menu (Message.MenuLoadSplits c)) clientId stateRef = do
+    Store.set "splits.active_splits" c
     newSplits <- loadSplits c
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
     return newSplits
+
+processCommand (Message.SetConfig k v) clientId stateRef = do
+    Store.set k v
+    return ackResponse
+
+processCommand (Message.FetchConfig k) clientId stateRef = do
+    vs <- Store.fetch_ k
+    return $ case vs of
+               []  -> ackResponse
+               v:_ -> Message.ConfigStore k v
 
 processCommand _ _ _ = return unsupportedResponse
 
@@ -234,7 +254,7 @@ segmentData s = do
         sid = fromIntegral . SQL.fromSqlKey $ skey
         name = Model.segmentName segment
         icon = Model.segmentIcon segment
-    pbRun  <- DB.run $ SQL.selectList [ Model.AttemptCompleted ==. True ] [ SQL.Asc Model.AttemptRealTime, SQL.LimitTo 1 ]
+    pbRun  <- DB.run $ SQL.selectList [ Model.AttemptCompleted ==. True, Model.AttemptCategory ==. (Model.segmentCategory segment) ] [ SQL.Asc Model.AttemptRealTime, SQL.LimitTo 1 ]
     pbSegment <- segmentDataPB pbRun skey
     record <- DB.run $ SQL.selectList [ Model.SplitSegment ==. skey ] [ SQL.Asc Model.SplitElapsed ]
     let gold  = fmap (Model.splitElapsed . entityVal) (Maybe.listToMaybe record)

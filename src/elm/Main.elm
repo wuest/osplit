@@ -6,8 +6,9 @@ import Html.Attributes as HA
 import Html.Events as HE
 import Json.Encode as JE
 import Json.Decode as JD
+import Dict as Dict
 
-import Types exposing (Msg(..), Socket, WebsocketMessage(..), SplitsMessage(..), TimeSyncResponse)
+import Types exposing (Msg(..), Socket, WebsocketMessage(..), SplitsMessage(..), TimeSyncResponse, ConfigStore)
 import Websocket as WS
 import Timer as Timer
 import Timer.Types as TT
@@ -30,6 +31,7 @@ type alias Model = { socket       : Maybe Socket
                    , menuPane     : MenuPane
                    , gameList     : List TT.Game
                    , categoryList : List TT.Category
+                   , configStore  : ConfigStore
                    }
 
 type TimerPane = Splits | Menu
@@ -44,6 +46,7 @@ init url = ( { socket = Nothing
              , menuPane = MainMenu
              , gameList = []
              , categoryList = []
+             , configStore = Dict.empty
              }
            , WS.open url
            )
@@ -62,11 +65,11 @@ update msg model =
         SendSocket value ->
             (model, send (.socket model) value)
         SocketOpened newsocket ->
-            ({ model | socket = Just newsocket }, WS.send newsocket <| Timer.syncRequest (.timer model))
+            ({ model | socket = Just newsocket }, WS.send newsocket joinAnnounce)
         SocketNotOpened ->
             (model, Cmd.none)
         SocketReceived data ->
-            (processData model data, Cmd.none)
+            processData model data
         SyncTime _ ->
             (model, send (.socket model) (Timer.syncRequest (.timer model)))
         CloseSplits ->
@@ -115,6 +118,11 @@ broadcastIntent ms msg = case msg of
         Just c_ -> send ms <| splitsLoadRequest c_
     -- Anything not explicitly matched can be safely ignored
     _                -> Cmd.none
+
+joinAnnounce : JE.Value
+joinAnnounce = JE.object [ ( "tag", JE.string "NewClient" )
+                         , ( "contents", JE.null )
+                         ]
 
 startSplitAnnounce : Int -> JE.Value
 startSplitAnnounce t = JE.object [ ( "tag", JE.string "TimerControl" )
@@ -202,26 +210,29 @@ checkTag_ : JD.Decoder String -> String -> JD.Decoder a -> JD.Decoder a
 checkTag_ ds target da =
     ds |> JD.andThen (\s -> if s == target then da else JD.fail ("No match on tag:" ++ s))
 
-processData : Model -> JE.Value -> Model
+processData : Model -> JE.Value -> (Model, Cmd Msg)
 processData model data =
     case processIncomingEvent data of
-        Ok (TimeSync response)        -> processTimeSync model response
-        Ok (SplitsControl ctl)        -> { model | timer = Timer.update (remoteControl ctl) (.timer model) }
-        Ok (UnloadSplits)             -> { model | timer = Timer.empty }
-        Ok (FetchedGameList games)    -> { model | gameList = games }
-        Ok (FetchedCategoryList cats) -> { model | categoryList = cats }
-        Ok (FetchedSplits Nothing)    -> model -- TODO: ERROR HANDLE THIS
-        Ok (FetchedSplits (Just s))   -> { model | timer = Timer.load s }
-        x                             -> model -- TODO: ESPECIALLY ERROR HANDLE THIS
+        Ok (TimeSync response)        -> ( processTimeSync model response, Cmd.none )
+        Ok (SplitsControl ctl)        -> ( { model | timer = Timer.update (remoteControl ctl) (.timer model) }, Cmd.none )
+        Ok (UnloadSplits)             -> ( { model | timer = Timer.empty }, Cmd.none )
+        Ok (FetchedGameList games)    -> ( { model | gameList = games }, Cmd.none )
+        Ok (FetchedCategoryList cats) -> ( { model | categoryList = cats }, Cmd.none )
+        Ok (FetchedSplits Nothing)    -> ( model, Cmd.none ) -- TODO: ERROR HANDLE THIS
+        Ok (FetchedSplits (Just s))   -> ( { model | timer = Timer.load s }, Cmd.none )
+        Ok (ConfigStoreSet k v)       -> ( { model | configStore = Dict.insert k v (.configStore model) }, broadcastIntent (.socket model) (LoadSplits (String.toInt v) ) ) -- TODO: CURRENTLY this fires only at initialization.  This is a bad assumption.  Rework this.
+        x                             -> ( model, Cmd.none ) -- TODO: ESPECIALLY ERROR HANDLE THIS
 
 processIncomingEvent : JE.Value -> Result JD.Error WebsocketMessage
 processIncomingEvent =
         JD.decodeValue <| JD.oneOf [ timeSyncResponseDecoder
+                                   , clientStateRequestDecoder
                                    , splitsControlDecoder
                                    , gameListDecoder
                                    , categoryListDecoder
                                    , splitsDecoder
                                    , closeSplitsDecoder
+                                   , configStoreDecoder
                                    ]
 
 closeSplitsDecoder : JD.Decoder WebsocketMessage
@@ -247,6 +258,11 @@ categoryListDecoder =
                                   ( JD.at [ "categoryData", "categoryOffset" ] JD.int )
             )
         )
+
+configStoreDecoder : JD.Decoder WebsocketMessage
+configStoreDecoder =
+    checkTag "ConfigStore" <| JD.map2 ConfigStoreSet ( JD.at [ "data", "contents" ] <| JD.index 0 JD.string )
+                                                     ( JD.at [ "data", "contents" ] <| JD.index 1 JD.string )
 
 splitsDecoder : JD.Decoder WebsocketMessage
 splitsDecoder =
@@ -281,6 +297,10 @@ newSegmentDecoder =
                        ( JD.at [ "segmentGold" ] <| JD.nullable JD.int )
                        ( JD.at [ "segmentAverage" ] <| JD.nullable JD.int )
                        ( JD.at [ "segmentWorst" ] <| JD.nullable JD.int )
+
+clientStateRequestDecoder : JD.Decoder WebsocketMessage
+clientStateRequestDecoder =
+    checkTag "ClientStateRequest" <| JD.map ClientStateRequest ( JD.at [ "data", "contents" ] JD.int )
 
 timeSyncResponseDecoder : JD.Decoder WebsocketMessage
 timeSyncResponseDecoder =

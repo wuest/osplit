@@ -33,6 +33,7 @@ executable osplit
                     , Data.Sqlite
                     -- LiveSplit Splits files
                     , Data.LSS
+                    , Data.ConfigStore
 
   build-depends:      base                  >= 4.9  && < 4.13
                     , text                  >= 1.2  && < 1.3

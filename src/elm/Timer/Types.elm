@@ -12,6 +12,7 @@ type Position = Previous
 type TimeStatus = Ahead
                 | Behind
                 | Gold
+                | BehindGold
 
 type TimeChange = Gaining TimeStatus
                 | Losing TimeStatus

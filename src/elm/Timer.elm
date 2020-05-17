@@ -250,6 +250,7 @@ timerClass_ s elapsedTime =
                             Gaining x ->
                                 case x of
                                     Behind -> "gaining-behind"
+                                    BehindGold -> "gaining-behind"
                                     _ -> "gaining-ahead"
                             Losing x ->
                                 case x of
@@ -265,6 +266,7 @@ timerClass_ s elapsedTime =
                     Gaining x ->
                         case x of
                             Behind -> "gaining-behind"
+                            BehindGold -> "gaining-behind"
                             _ -> "gaining-ahead"
                     Losing x ->
                         case x of
@@ -372,11 +374,13 @@ changeDisplay maybeChange =
                         Behind -> [("behind-split", True), ("gaining-split", True)]
                         Ahead -> [("ahead-split", True), ("gaining-split", True)]
                         Gold -> [("gold-split", True), ("gaining-split", True)]
+                        BehindGold -> [("gold-split", True), ("gaining-split", True)]
                 Losing x ->
                     case x of
                         Behind -> [("behind-split", True), ("losing-split", True)]
                         Ahead -> [("ahead-split", True), ("losing-split", True)]
                         Gold -> [("gold-split", True), ("gaining-split", True)] -- This occurs when there is no gold for the split
+                        BehindGold -> [("gold-split", True), ("gaining-split", True)]
                 Skipped -> [("skipped-split", True)]
 
 conditionalOffset : Position -> Int -> Int -> H.Html Msg
@@ -553,7 +557,12 @@ timeStatus (elapsedTotal, segmentTime) (compareTotal, goldTime) =
         Nothing -> Gold
         Just gt ->
             if gt > segmentTime
-            then Gold
+            then case compareTotal of
+                Nothing -> Gold
+                Just ct ->
+                    if elapsedTotal <= ct
+                    then Gold
+                    else BehindGold
             else case compareTotal of
                 Nothing -> Ahead
                 Just ct ->
