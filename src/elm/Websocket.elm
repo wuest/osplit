@@ -1,4 +1,5 @@
-port module Websocket exposing ( open , openWithProto, openWithProtos
+port module Websocket exposing ( Socket
+                               , open, openWithProto, openWithProtos
                                , createWS, send
                                , subscriptions
                                )
@@ -6,7 +7,11 @@ port module Websocket exposing ( open , openWithProto, openWithProtos
 import Json.Encode as JE
 import Json.Decode as JD
 
-import Types exposing (Socket, SocketSpec, Msg(..))
+type alias SocketSpec = (String, List String)
+
+type alias Socket = { url : String
+                    , fd : Int
+                    }
 
 type alias SocketData = { socket : Socket
                         , data : JE.Value
@@ -35,12 +40,13 @@ decodeSocket = JD.decodeValue <| JD.map2 Socket
     (JD.field "url" JD.string)
     (JD.field "fd" JD.int)
 
-processNewFD : JD.Value -> Msg
-processNewFD value = case (decodeSocket value) of
-    Ok socket -> SocketOpened socket
-    Err _     -> SocketNotOpened
+processNewFD : (Socket -> msg) -> (JD.Error -> msg) -> JD.Value -> msg
+processNewFD msgOpened msgNotOpened value = case (decodeSocket value) of
+    Ok socket -> msgOpened socket
+    Err msg   -> msgNotOpened msg
 
-subscriptions : Sub Msg
-subscriptions = Sub.batch [ newFD processNewFD
-                          , recv SocketReceived
-                          ]
+subscriptions : (Socket -> msg) -> (JD.Error -> msg) -> (JE.Value -> msg) -> Sub msg
+subscriptions opened notOpened received =
+    Sub.batch [ newFD <| processNewFD opened notOpened
+              , recv received
+              ]

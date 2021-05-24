@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications  #-}
+{-# LANGUAGE NamedFieldPuns    #-}
 
 module Websockets ( initState
                   , app
@@ -6,7 +8,7 @@ module Websockets ( initState
 where
 
 import Prelude
-import Control.Monad ( forever )
+import Control.Monad ( forever, mzero )
 import GHC.Generics  ( Generic )
 
 import qualified Control.Concurrent             as Concurrent
@@ -126,14 +128,14 @@ processCommand (Message.NewClient) clientId stateRef = do
 processCommand (Message.TimerControl (Message.RemoteStartSplit i)) clientId stateRef = do
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ startSplit i
     return ackResponse
-processCommand (Message.TimerControl (Message.RemoteUnsplit i)) clientId stateRef = do
-    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ unsplit i
+processCommand (Message.TimerControl Message.RemoteUnsplit) clientId stateRef = do
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) unsplit
     return ackResponse
-processCommand (Message.TimerControl (Message.RemoteSkip i)) clientId stateRef = do
-    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ skip i
+processCommand (Message.TimerControl Message.RemoteSkip) clientId stateRef = do
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) skip
     return ackResponse
-processCommand (Message.TimerControl (Message.RemoteStop i)) clientId stateRef = do
-    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ stopSplits i
+processCommand (Message.TimerControl Message.RemoteStop) clientId stateRef = do
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) stopSplits
     return ackResponse
 processCommand (Message.TimerControl (Message.RemoteReset s)) clientId stateRef = do
     _ <- saveRun False s
@@ -171,19 +173,29 @@ processCommand (Message.FetchConfig k) clientId stateRef = do
                []  -> ackResponse
                v:_ -> Message.ConfigStore k v
 
+processCommand (Message.NewSplits (Message.NewSplitsSpec title subtitle game' category' segments)) clientId stateRef = do
+    game <- createFetchGame game'
+    category <- createCategory game category'
+    mapM_ (createSegment category) segments
+    let c = fromIntegral . SQL.fromSqlKey $ category
+    Store.set "splits.active_splits" c
+    newSplits <- loadSplits c
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
+    return newSplits
+
 processCommand _ _ _ = return unsupportedResponse
 
 startSplit :: Int -> Message.Response
-startSplit i = Message.RemoteControl (Message.RemoteStartSplit i)
+startSplit = Message.RemoteControl . Message.RemoteStartSplit
 
-unsplit :: Int -> Message.Response
-unsplit i = Message.RemoteControl (Message.RemoteUnsplit i)
+unsplit :: Message.Response
+unsplit = Message.RemoteControl Message.RemoteUnsplit
 
-skip :: Int -> Message.Response
-skip i = Message.RemoteControl (Message.RemoteSkip i)
+skip :: Message.Response
+skip = Message.RemoteControl Message.RemoteSkip
 
-stopSplits :: Int -> Message.Response
-stopSplits i = Message.RemoteControl (Message.RemoteStop i)
+stopSplits :: Message.Response
+stopSplits = Message.RemoteControl Message.RemoteStop
 
 reset :: Message.Response
 reset = Message.RemoteControl (Message.RemoteReset (Message.SplitSet (negate 1) [] 0 0 0))
@@ -272,14 +284,13 @@ segmentDataPB (run:_) skey = do
       False -> Just . Model.splitElapsed . entityVal $ head segment
 
 saveRun :: Bool -> Message.SplitSet -> DB.DBPoolM ()
-saveRun finished splitSet = do
-    let c       = SQL.toSqlKey . fromIntegral $ Message.runCategory splitSet
-        s       = millisToUTCTime . Message.startTime $ splitSet
-        e       = millisToUTCTime . Message.endTime $ splitSet
-        r       = Message.realTime splitSet
-        attempt = Model.Attempt c s False e False r finished -- TODO: BUG: Fix NTP syncing for this
+saveRun finished (Message.SplitSet cat segments start end realTime) = do
+    let c       = SQL.toSqlKey $ fromIntegral cat
+        s       = millisToUTCTime start
+        e       = millisToUTCTime end
+        attempt = Model.Attempt c s False e False realTime finished -- TODO: BUG: Fix NTP syncing for this
     attemptID <- DB.run $ SQL.insert attempt
-    mapM_ (saveSegment attemptID) (Message.segments splitSet)
+    mapM_ (saveSegment attemptID) segments
     return ()
 
 saveSegment :: Model.Key Model.Attempt -> Message.SegmentTime -> DB.DBPoolM ()
@@ -290,3 +301,21 @@ saveSegment aid st =
 
 millisToUTCTime :: Int -> Time.UTCTime
 millisToUTCTime time = Clock.posixSecondsToUTCTime $ (fromIntegral time) / 1000
+
+createFetchGame :: Message.GameSpec -> DB.DBPoolM (Model.Key Model.Game)
+createFetchGame (Message.GameSpec name icon offset) = do
+    c <- DB.run $ SQL.count [ Model.GameName ==. name ]
+    if c < 1
+    then
+        DB.run $ SQL.insert $ Model.Game name icon (fromIntegral offset)
+    else do
+        gs <- DB.run $ SQL.selectList [ Model.GameName ==. name ] [] :: DB.DBPoolM [SQL.Entity Model.Game]
+        case gs of
+          g:_ -> return $ entityKey g
+          [] -> mzero -- Only possible via race condition of check vs select
+
+createCategory :: Model.Key Model.Game -> Message.CategorySpec -> DB.DBPoolM (Model.Key Model.Category)
+createCategory g (Message.CategorySpec name offset) = DB.run $ SQL.insert $ Model.Category name g (fromIntegral offset)
+
+createSegment :: Model.Key Model.Category -> Message.SegmentSpec -> DB.DBPoolM ()
+createSegment cat (Message.SegmentSpec name icon) = DB.run $ SQL.insert_ $ Model.Segment cat name icon

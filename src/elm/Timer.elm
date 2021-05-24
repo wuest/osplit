@@ -1,597 +1,555 @@
-module Timer exposing ( Timer
-                      , empty, start, stop, reset
-                      , edit, view, subscriptions, update, load
-                      , syncRequest, processSyncResponse, toJSON
-                      , isCompleted
+module Timer exposing ( Timer(..), RunTracker(..), TimingData, TimingDatum
+                      , mapT, mapR
+                      , splitsFor, runFor, aggregateRun
+                      , Game, Category, Run, Splits, SplitSet, Split, Segment, RunSpec(..), SplitsSpec
+                      , empty, emptySegment, emptySplitSet
+                      , start, stop, reset, split, unsplit, skip, setTime
+                      , load, toJSON
+                      , gameDecoder, categoryDecoder, segmentDecoder, segmentListDecoder, runSpecDecoder
                       )
 
-import Timer.Types exposing ( .. )
+import Time        as T
+import Json.Encode as JE
+import Json.Decode as JD
 
-import Html            as H
-import Html.Attributes as Attr
-import Html.Events     as Event
-import Time            as T
-import Json.Encode     as JE
+type alias Time = T.Posix
+type alias Icon = Maybe String
 
-import Types exposing ( Msg(..), TimeSyncResponse )
+type Timer = Stopped  Splits
+           | Paused   Splits
+           | Finished Splits
+           | Running  Splits
 
-import Debug as D
+type alias Game = { entityID : Maybe Int
+                  , name     : String
+                  , icon     : Icon
+                  , offset   : Int
+                  }
 
-type alias SplitsListAccumulator = (Int, TimeSum, List (H.Html Msg))
+type alias Category = { entityID : Maybe Int
+                      , name     : String
+                      , offset   : Int
+                      }
 
-type alias Timer = Timer.Types.Timer
+type alias Segment = { entityID : Maybe Int
+                     , name     : String
+                     , icon     : Icon
+                     , pb       : Maybe Int
+                     , gold     : Maybe Int
+                     , average  : Maybe Int
+                     , worst    : Maybe Int
+                     }
 
-{- BASE TIMER FUNCTIONS -}
-empty : Timer
-empty = Stopped empty_
+type SplitStatus = Incomplete
+                 | Skipped
+                 | Completed Time
 
-empty_ : Splits
-empty_ = { started   = zero
-         , current   = zero
-         , elapsed   = 0
-         , game      = noGame
-         , category  = noCategory
-         , passed    = noSplits
-         , split     = noSplit
-         , remaining = noSplits
-         }
+type alias Split = { segment   : Segment
+                   , endTime   : Maybe Time
+                   }
 
-load : SplitsSpec -> Timer
-load newSplits =
-    let s     = List.head <| .segments newSplits
-        rest_ = List.tail <| .segments newSplits
-        rest  = case rest_ of
-            Nothing -> []
-            Just r  -> r
-    in Stopped { empty_ | game = .game newSplits
-                        , category = .category newSplits
-                        , split = s
-                        , remaining = rest
-               }
+type alias SplitSet = { previous : List Split
+                      , current  : Maybe Split
+                      , upcoming : List Split
+                      }
 
-elapsed : Timer -> Int
-elapsed t = case t of
-    Running s -> (.elapsed s) + ((millis <| .current s) - (millis <| .started s))
-    Stopped s -> .elapsed s
+type alias Run = { runStarted : Maybe Time
+                 , runEnded   : Maybe Time
+                 , game       : Game
+                 , category   : Category
+                 , splits     : SplitSet
+                 }
 
-isCompleted : Timer -> Bool
-isCompleted t = case t of
-    Running _ -> False
-    Stopped s -> (.split s) == Nothing
+type alias RunSet = { previous : List Run
+                    , current  : Maybe Run
+                    , upcoming : List Run
+                    }
 
-start : Timer -> Int -> Timer
-start t i = case t of
-    Running s -> split t i
-    Stopped s ->
-        case .split s of
-            Nothing -> t
-            Just s_ -> Running { s | started = .current s }
+type RunTracker = SingleCategory Run
+                | MultiCategory RunSet
 
-stop : Timer -> Timer
-stop t = case t of
-    Running s -> Stopped { s | elapsed = elapsed t }
-    Stopped _ -> t
+type alias Splits = { runStarted  : Maybe Time
+                    , runEnded    : Maybe Time
+                    , currentTime : Time
+                    , title       : String
+                    , subtitle    : String
+                    , runTracker  : RunTracker
+                    }
 
-reset : Timer -> Timer
-reset t = let s = resetSplitsFor t
-          in Stopped { s | started = time 0, current = time 0, elapsed = 0 }
+type RunSpec = SingleCategorySpec Run
+             | MultiCategorySpec (List Run)
 
-resetSplitsFor : Timer -> Splits
-resetSplitsFor t =
-    let s = splitsFor t
-    in
-        case .split s of
-            Nothing ->
-                case List.head (.passed s) of
-                    Nothing -> s
-                    Just s_ -> { s | split = Just { s_ | time = Nothing, change = Nothing }, remaining = List.map (\x -> { x | time = Nothing, change = Nothing }) <| List.drop 1 <| .passed s, passed = [] }
-            Just s_ ->
-                let fullList = List.map (\x -> { x | time = Nothing, change = Nothing }) <| List.concat [.passed s, [s_], .remaining s]
-                in
-                    case fullList of
-                        fst :: rst -> { s | split = Just fst, remaining = rst, passed = [] }
-                        []         -> s -- This branch should never be reached by god or man
+type alias SplitsSpec = { title    : String
+                        , subtitle : String
+                        , run      : RunSpec
+                        }
 
-setTime : Timer -> T.Posix -> Timer
-setTime t p = case t of
-    Running s -> Running { s | current = p }
-    Stopped s -> Stopped { s | current = p }
+type alias TimingDatum = { segment    : Segment
+                         , running    : Segment
+                         , singleTime : Maybe Int
+                         , currentSum : Maybe Int
+                         , timingTags : List (String, Bool)
+                         }
 
-split : Timer -> Int -> Timer
-split t i = case t of
-    Running s -> split_ s i
-    Stopped s -> t
-
-split_ : Splits -> Int -> Timer
-split_ s i =
-    case .split s of
-        Nothing -> stop <| Running s -- Only reachable when no splits are loaded
-        Just s_ -> let elapsedTime = (.elapsed s) + ((millis <| .current s) - (millis <| .started s)) -- this is duplicated a few places.  Please fix.
-                       segmentTime = i - (List.sum <| List.map (.time >> tfm) (.passed s))
-                       splitStatus = timeStatus (i, segmentTime) (pbSum (List.append (.passed s) [s_]), (.segment >> .gold) s_)
-                       splitChange = timeChange splitStatus segmentTime <| (.segment >> .pb >> tfm) s_
-                       priorSplit = { s_ | time = Just segmentTime, change = Just splitChange }
-                       newPassed = List.append (.passed s) [priorSplit]
-                       remaining = .remaining s
-                   in
-                       case List.head remaining of
-                           Nothing -> stop <| Running { s | passed = newPassed, split = Nothing }
-                           next    ->         Running { s | passed = newPassed, split = next, remaining = List.drop 1 remaining }
-
-unsplit : Timer -> Timer
-unsplit t = case t of
-    Running s -> Running <| unsplit_ s
-    Stopped s -> Running <| unsplit_ s
-
-unsplit_ : Splits -> Splits
-unsplit_ s =
-    case List.reverse <| .passed s of
-        []      -> s
-        x :: xs -> case .split s of
-            Nothing -> { s | split     = Just { x | time = Nothing, change = Nothing }
-                       ,     passed    = List.reverse xs
-                       ,     elapsed   = .elapsed s - (tfm <| .time x)
-                       }
-            Just s_ -> { s | split     = Just { x | time = Nothing, change = Nothing }
-                       ,     passed    = List.reverse xs
-                       ,     remaining = s_ :: (.remaining s)
-                       }
-
-skip : Timer -> Timer
-skip t = case t of
-    Running s -> skip_ s
-    Stopped s -> t
-
-skip_ : Splits -> Timer
-skip_ s =
-    case .split s of
-        Nothing -> Running s -- Cannot skip final split
-        Just s_ -> let skippedSplit = { s_ | change = Just Skipped }
-                       newPassed    = List.append (.passed s) [skippedSplit]
-                       remaining    = .remaining s
-                   in
-                       case List.head remaining of
-                           Nothing -> Running s -- Cannot skip final split
-                           next    -> Running { s | passed = newPassed, split = next, remaining = List.drop 1 remaining }
-
-{- FORMATTING -}
-show : Int -> Timer -> H.Html Msg
-show minSegments t = show_ minSegments (elapsed t) False
-
-show_ : Int -> Int -> Bool -> H.Html Msg
-show_ minSegments uSeconds showSign =
-    let n  = if uSeconds < 0 then "-" else
-                 if showSign == True then "+" else ""
-        e  = abs uSeconds
-        h  = e // hour
-        hr = e - (h * hour)
-        m  = hr // minute
-        mr = hr - (m * minute)
-        s  = mr // second
-        u  = mr - (s * second)
-    in
-        H.div [ Attr.class "time-readout" ]
-              ( List.concat [ [(H.div [ Attr.class "time-sign" ] [ H.text n ])]
-                            , clockSegments minSegments h m s u
-                            ]
-              )
-
-clockSegments : Int -> Int -> Int -> Int -> Int -> List (H.Html Msg)
-clockSegments minSegments h m s u =
-    let hD = if minSegments > 3 || h > 0 then [ H.div [ Attr.class "time-hour" ] [ H.text <| timerSegment False h ] ] else []
-        mD = if minSegments > 2 || (h + m) > 0 then [ H.div [ Attr.class "time-minute" ] [ H.text <| timerSegment (h > 0 || minSegments > 3) m ] ] else []
-        sD = [ H.div [ Attr.class "time-second" ] [ H.text <| timerSegment True s ] ]
-        uD = [ H.div [ Attr.class "time-usecond" ] [ H.text <| timerSegment True <| u // 10 ] ]
-    in
-        List.concat [List.intersperse divC <| List.concat [hD, mD, sD], [divD], uD]
-
-divC : H.Html Msg
-divC = H.div [ Attr.class "time-colon" ] [ H.text ":" ]
-
-divD : H.Html Msg
-divD = H.div [ Attr.class "time-decimal" ] [ H.text "." ]
-
-game : Timer -> String
-game = splitsFor >> .game >> .name
-
-category : Timer -> String
-category = splitsFor >> .category >> .name
-
-hour : number
-hour = 3600000 -- 60 minutes * 60 seconds * 1000 milliseconds
-
-minute : number
-minute = 60000 -- 60 seconds * 1000 milliseconds
-
-second : number
-second = 1000 -- 1000 milliseconds
-
-{- VIEW -}
-edit : Timer -> H.Html Msg
-edit = view
-
-view : Timer -> H.Html Msg
-view t =
-    H.div [ Attr.id "timer-container" ]
-          [ H.div [ Attr.id "timer-title" ]
-                  [ H.text <| game t ]
-          , H.div [ Attr.id "timer-category" ]
-                  [ H.text <| category t ]
-          , splitsList t
-          , H.div [ Attr.id "main-timer"
-                  , Attr.class <| timerClass t
-                  ]
-                  [ show 3 t ]
-          , H.button [ Event.onClick <| StartSplit (elapsed t) ] [ H.text "Start/Split" ]
-          , H.button [ Event.onClick <| Unsplit (elapsed t) ] [ H.text "Unsplit" ]
-          , H.button [ Event.onClick <| Skip (elapsed t) ] [ H.text "Skip" ]
-          , H.button [ Event.onClick <| Stop (elapsed t) ] [ H.text "Stop" ]
-          , H.button [ Event.onClick <| Reset t ] [ H.text "Reset" ]
-          ]
-
-timerClass : Timer -> String
-timerClass t =
-    case t of
-        Stopped s -> if elapsed t == 0 then "neutral" else timerClass_ s <| elapsed t
-        Running s -> timerClass_ s <| elapsed t
-
-timerClass_ : Splits -> Int -> String
-timerClass_ s elapsedTime =
-    case .split s of
-        Nothing ->
-            case List.head <| List.drop ((List.length <| .passed s) - 1) (.passed s) of
-                Nothing -> "neutral"
-                Just s_ ->
-                    let segmentTime = elapsedTime - (List.sum <| List.map (.time >> tfm) (.passed s))
-                        splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), (.segment >> .gold) s_)
-                        splitChange = timeChange splitStatus segmentTime <| (.segment >> .pb >> tfm) s_
-                    in
-                        case splitChange of
-                            Gaining x ->
-                                case x of
-                                    Behind -> "gaining-behind"
-                                    BehindGold -> "gaining-behind"
-                                    _ -> "gaining-ahead"
-                            Losing x ->
-                                case x of
-                                    Behind -> "losing-behind"
-                                    _ -> "losing-ahead"
-                            _ -> "impossible"
-        Just s_ ->
-            let segmentTime = elapsedTime - (List.sum <| List.map (.time >> tfm) (.passed s))
-                splitStatus = timeStatus (elapsedTime, segmentTime) (pbSum (List.append (.passed s) [s_]), (.segment >> .gold) s_)
-                splitChange = timeChange splitStatus segmentTime <| (.segment >> .pb >> tfm) s_
-            in
-                case splitChange of
-                    Gaining x ->
-                        case x of
-                            Behind -> "gaining-behind"
-                            BehindGold -> "gaining-behind"
-                            _ -> "gaining-ahead"
-                    Losing x ->
-                        case x of
-                            Behind -> "losing-behind"
-                            _ -> "losing-ahead"
-                    _ -> "impossible"
-
-splitsListHeader : H.Html Msg
-splitsListHeader =
-    H.div [ Attr.id "split-listheader"
-          , Attr.classList [("header", True), ("split", True)]
-          ]
-          [ H.div [ Attr.id <| "split-listheader-name", Attr.classList [("split-column", True), ("split-name", True)] ] [ H.text "" ]
-          , H.div [ Attr.id <| "split-listheader-pb", Attr.classList [("split-column", True), ("pb", True)] ] [ H.text "+/- pb" ]
-          , H.div [ Attr.id <| "split-listheader-gold", Attr.classList [("split-column", True), ("gold", True)] ] [ H.text "+/- gold" ]
-          , H.div [ Attr.id <| "split-listheader-average", Attr.classList [("split-column", True), ("average", True)] ] [ H.text "+/- avg" ]
-          , H.div [ Attr.id <| "split-listheader-worst", Attr.classList [("split-column", True), ("worst", True)] ] [ H.text "+/- worst" ]
-          , H.div [ Attr.id <| "split-listheader-split", Attr.classList [("split-column", True), ("split", True)] ] [ H.text "" ]
-          , H.div [ Attr.id <| "split-listheader-pb", Attr.classList [("split-column", True), ("running-pb", True)] ] [ H.text "+/- pb" ]
-          , H.div [ Attr.id <| "split-listheader-gold", Attr.classList [("split-column", True), ("running-gold", True)] ] [ H.text "+/- gold" ]
-          , H.div [ Attr.id <| "split-listheader-average", Attr.classList [("split-column", True), ("running-average", True)] ] [ H.text "+/- avg" ]
-          , H.div [ Attr.id <| "split-listheader-worst", Attr.classList [("split-column", True), ("running-worst", True)] ] [ H.text "+/- worst" ]
-          , H.div [ Attr.id <| "split-listheader-split", Attr.classList [("split-column", True), ("running-current", True)] ] [ H.text "" ]
-          ]
-
-splitsList : Timer -> H.Html Msg
-splitsList t =
-    let s = splitsFor t
-        r = elapsed t
-        initSum = { pb = 0, gold = Just 0, average = 0, worst = 0, current = 0 }
-        (n, times, hs) = List.foldl (splitsList_ Previous r) (0, initSum, []) (.passed s)
-        currentStatus = case t of Running _ -> Current
-                                  Stopped _ -> Upcoming
-    in
-        case .split s of
-            Nothing   ->
-                H.div [ Attr.id "splits-container" ] (splitsListHeader :: (List.reverse hs))
-            Just next ->
-                let (n_, times_, hs_)  = splitsList_ currentStatus r next (n, times, hs)
-                    (_, _, hs__) = List.foldl (splitsList_ Upcoming r) (n_, times_, hs_) (.remaining s)
-                in
-                  H.div [ Attr.id "splits-container" ] (splitsListHeader :: (List.reverse hs__))
-
-splitsList_ : Position -> Int -> Split -> SplitsListAccumulator -> SplitsListAccumulator
-splitsList_ relativePosition runningTime thisSplit (n, times, hs) =
-    let pb   =        (.segment >> .pb) thisSplit
-        g    =        (.segment >> .gold) thisSplit
-        a    = tfm <| (.segment >> .average) thisSplit
-        w    = tfm <| (.segment >> .worst) thisSplit
-        s    = tfm <| .time thisSplit
-        name = (.segment >> .name) thisSplit
-        icon = (.segment >> .icon) thisSplit
-        pos  = String.fromInt n
-        nt   = { times | pb = (.pb times) + (tfm pb)
-               ,         gold = liftA2 (+) (.gold times) g
-               ,         average = (.average times) + a
-               ,         worst = (.worst times) + w
-               ,         current = (.current times) + s
-               }
-        cpb  = fmap ((+) (.pb times)) pb
-        divContent = case .change thisSplit of
-                         Just Skipped ->
-                             [ H.div [ Attr.id <| "split-" ++ pos ++ "-name", Attr.class "split-name" ] [ H.text <| (.segment >> .name) thisSplit ]
-                             , runningDiv pos "pb" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             , runningDiv pos "gold" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             , runningDiv pos "average" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             , runningDiv pos "worst" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             , runningDiv pos "split" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-
-                             , runningDiv pos "running-pb" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             , runningDiv pos "running-gold" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             , runningDiv pos "running-average" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             , runningDiv pos "running-worst" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             , runningDiv pos "running-current" <| H.div [ Attr.class "time-readout" ] [ H.text "-" ]
-                             ]
-                         _ ->
-                             [ H.div [ Attr.id <| "split-" ++ pos ++ "-name", Attr.class "split-name" ] [ H.text <| (.segment >> .name) thisSplit ]
-                             , runningDiv pos "pb" <| conditionalOffsetM relativePosition pb s
-                             , runningDiv pos "gold" <| conditionalOffsetM relativePosition g s
-                             , runningDiv pos "average" <| conditionalOffset relativePosition a s
-                             , runningDiv pos "worst" <| conditionalOffset relativePosition w s
-                             , runningDiv pos "split" <| show_ 2 s False
-
-                             , runningDiv pos "running-pb" <| conditionalOffsetM relativePosition cpb (.current nt)
-                             , runningDiv pos "running-gold" <| conditionalOffsetM relativePosition (.gold nt) (.current nt)
-                             , runningDiv pos "running-average" <| conditionalOffset relativePosition (.average nt) (.current nt)
-                             , runningDiv pos "running-worst" <| conditionalOffset relativePosition (.worst nt) (.current nt)
-                             , runningDiv pos "running-current" <| conditionalOffset_ relativePosition (.current nt) runningTime
-                             ]
-        div  = H.div [ Attr.id ("split-" ++ pos)
-                     , Attr.classList <| List.concat [[("split", True), ("current", relativePosition == Current)], changeDisplay <| .change thisSplit]
-                     ]
-                     divContent
-    in
-        (n + 1, nt, div :: hs)
-
-changeDisplay : Maybe TimeChange -> List (String, Bool)
-changeDisplay maybeChange =
-    case maybeChange of
-        Nothing -> []
-        Just change ->
-            case change of
-                Gaining x ->
-                    case x of
-                        Behind -> [("behind-split", True), ("gaining-split", True)]
-                        Ahead -> [("ahead-split", True), ("gaining-split", True)]
-                        Gold -> [("gold-split", True), ("gaining-split", True)]
-                        BehindGold -> [("gold-split", True), ("gaining-split", True)]
-                Losing x ->
-                    case x of
-                        Behind -> [("behind-split", True), ("losing-split", True)]
-                        Ahead -> [("ahead-split", True), ("losing-split", True)]
-                        Gold -> [("gold-split", True), ("gaining-split", True)] -- This occurs when there is no gold for the split
-                        BehindGold -> [("gold-split", True), ("gaining-split", True)]
-                Skipped -> [("skipped-split", True)]
-
-conditionalOffset : Position -> Int -> Int -> H.Html Msg
-conditionalOffset pos segmentTime currentTime =
-    case pos of
-        Previous -> show_ 2 (currentTime - segmentTime) True
-        _        -> show_ 2 segmentTime False
-
-conditionalOffset_ : Position -> Int -> Int -> H.Html Msg
-conditionalOffset_ pos segmentTime runningTime =
-    case pos of
-        Upcoming -> H.div [] []
-        Current  -> show_ 2 runningTime False
-        Previous -> show_ 2 segmentTime False
-
-conditionalOffsetM : Position -> Maybe Int -> Int -> H.Html Msg
-conditionalOffsetM pos segmentTime currentTime =
-    case segmentTime of
-        Nothing -> H.div [] []
-        Just s  -> conditionalOffset pos s currentTime
-
-runningDiv : String -> String -> H.Html Msg -> H.Html Msg
-runningDiv splitID tag displayTime =
-    H.div [ Attr.id <| "split-" ++ splitID ++ "-" ++ tag
-          , Attr.classList [("split-column", True), (tag, True), ("segmentTime", True)]
-          ]
-          [ displayTime ]
-
-{- SUBSCRIPTIONS -}
-subscriptions : Sub Msg
-subscriptions = Sub.batch [ T.every 1 Tick
-                          , T.every (5 * minute) SyncTime
-                          ]
-
-{- UPDATE -}
-update : Msg -> Timer -> Timer
-update msg t = case msg of
-    StartSplit i -> start t i
-    Unsplit _    -> unsplit t
-    Skip _       -> skip t
-    Stop _       -> stop t
-    Reset timer  -> reset timer
-    Tick tick    -> setTime t tick
-    CloseSplits  -> empty
-    _            -> t
-
-{- TIME SYNC -}
-syncRequest : Timer -> JE.Value
-syncRequest t =
-    let currentTime = (splitsFor >> .current >> millis) t in
-        JE.object [ ( "tag", JE.string "TimeSyncInit" )
-                  , ( "contents"
-                    , JE.object [ ( "currentTime", JE.int currentTime )
-                                , ( "previousOffset", JE.null )
-                                ]
-                    )
-                  ]
---                  {"currentTime":0,            "previousOffset":null}
---                  {"currentTime":1582599029907,"previousOffset":null}
---                  {"currentTime":1582599150230,"previousOffset":null}
-
-processSyncResponse : Timer -> TimeSyncResponse -> Int
-processSyncResponse t response =
-    let currentTime = (splitsFor >> .current >> millis) t in
-        ((currentTime - (.currentTime response)) + (.previousOffset response)) // 2
-
-toJSON : Timer -> JE.Value
-toJSON t =
-    let pull ms = case ms of
-            Nothing -> []
-            Just js -> [js]
-        cat = case (splitsFor >> .category >> .entityID) t of
-            Nothing -> JE.null
-            Just c  -> JE.int c
-        splits = splitsFor t
-        p = .passed splits
-        s = pull <| .split splits
-        r = .remaining splits
-        allSplits =  p ++ s ++ r
-        startTime = (.started >> millis) splits
-        realTime  = elapsed t
-        endTime   = startTime + realTime
-    in
-        JE.object [ ( "runCategory", cat )
-                  , ( "segments", JE.list segmentsJSON <| List.filter (\x -> ((.entityID <| .segment x) /= Nothing) && ((.time x) /= Nothing) ) allSplits )
-                  , ( "startTime", JE.int startTime )
-                  , ( "realTime", JE.int realTime )
-                  , ( "endTime", JE.int endTime )
-                  ]
-
-segmentsJSON : Split -> JE.Value
-segmentsJSON s =
-    case .entityID <| .segment s of
-        Just i  -> JE.object [ ("segment", JE.int i)
-                             , ("time", segmentsJSON_ <| .time s)
-                             ]
-        Nothing -> JE.null -- unreachable
-
-segmentsJSON_ : Maybe Int -> JE.Value
-segmentsJSON_ x =
-    case x of
-        Just y  -> JE.int y
-        Nothing -> JE.null -- unreachable
+type alias TimingData = { previous : List TimingDatum
+                        , current : Maybe TimingDatum
+                        , upcoming : List TimingDatum
+                        }
 
 {- HELPER FUNCTIONS -}
-millis : Time -> Int
-millis = T.posixToMillis
-
-time : Int -> Time
-time = T.millisToPosix
-
-zero : Time
-zero = T.millisToPosix 0
+epoch : Time
+epoch = T.millisToPosix 0
 
 noGame : Game
 noGame = { entityID = Nothing
-         , name     = ""
+         , name     = "(No Game)"
          , icon     = Nothing
          , offset   = 0
          }
 
-noSplit : Maybe Split
-noSplit = Just { segment = { entityID = Just -1, name = "", icon = Nothing, pb = Nothing, gold = Nothing, average = Nothing, worst = Nothing }, time = Nothing, change = Nothing }
-
-noSplits : SplitSet
-noSplits = [ ]
-
 noCategory : Category
 noCategory = { entityID = Nothing
-             , name = ""
-             , offset = 0
+             , name     = "(No Category)"
+             , offset   = 0
              }
 
-splitsFor : Timer -> Splits
-splitsFor t = case t of
-    Running t_ -> t_
-    Stopped t_ -> t_
+emptySegment : Segment
+emptySegment = { entityID = Nothing
+               , name     = "---"
+               , icon     = Nothing
+               , pb       = Nothing
+               , gold     = Nothing
+               , average  = Nothing
+               , worst    = Nothing
+               }
 
--- Enumerable#detect from ruby, more or less, but gives an index too
-detect : (a -> Bool) -> List a -> Maybe (Int, a)
-detect p xs = detect_ 0 p xs
+initSegment : Segment
+initSegment = { entityID = Nothing
+              , name     = "Run aggregation initial segment"
+              , icon     = Nothing
+              , pb       = Nothing
+              , gold     = Nothing
+              , average  = Nothing
+              , worst    = Nothing
+              }
 
-detect_ : Int -> (a -> Bool) -> List a -> Maybe (Int, a)
-detect_ i p xs = case xs of
-    [] -> Nothing
-    x :: xs_ -> if p x
-                then Just (i, x)
-                else detect_ (i+1) p xs_
+emptySplitSet : SplitSet
+emptySplitSet = { previous = []
+                , current  = Nothing
+                , upcoming = [ { segment = emptySegment
+                               , endTime = Nothing
+                               }
+                             ]
+                }
 
--- Fetch a pivot point, return a tuple of before, pivot, after
-partitionAt : Int -> List a -> Maybe (List a, a, List a)
-partitionAt i xs =
-    let a = List.take i xs
-        b = List.head <| List.drop i xs
-        c = List.drop (i + 1) xs
+noRun : Run
+noRun = { runStarted = Nothing
+        , runEnded   = Nothing
+        , game       = noGame
+        , category   = noCategory
+        , splits     = emptySplitSet
+        }
+
+noSingleRun : RunTracker
+noSingleRun = SingleCategory noRun
+
+tfm : Maybe Time -> Time
+tfm = Maybe.withDefault epoch
+
+mapT : (Splits -> Splits) -> Timer -> Timer
+mapT f t = case t of
+    Stopped  s -> Stopped  <| f s
+    Paused   s -> Paused   <| f s
+    Finished s -> Finished <| f s
+    Running  s -> Running  <| f s
+
+mapR : (Run -> Run) -> Splits -> Splits
+mapR f splits = case (.runTracker splits) of
+    SingleCategory r -> { splits | runTracker = SingleCategory <| f r }
+    MultiCategory rs ->
+        let c = .current rs
+        in case c of
+            Nothing -> splits
+            Just r  -> { splits | runTracker = MultiCategory { rs | current = Just <| f r } }
+
+aggregateRun : Int -> Run -> TimingData
+aggregateRun now r =
+    let previous = .previous <| .splits r
+        upcoming = .upcoming <| .splits r
+        current = case .current (.splits r) of
+                      Nothing -> []
+                      Just s  -> [s]
+        ((pastSegment, _), runningTotalsP) = List.foldl (aggregateRun_ now) ((initSegment, Just 0), []) previous
+        (currentSegment, runningTotalC_) = List.foldl (aggregateRun_ now) ((pastSegment, Nothing), []) current
+        (_, runningTotalsU) = List.foldl (aggregateRun_ now) (currentSegment, []) upcoming
+        runningTotalC = case runningTotalC_ of
+                            [] -> Nothing
+                            x :: _ -> Just x
+    in { previous = runningTotalsP, current = runningTotalC, upcoming = runningTotalsU }
+
+-- TODO
+-- It would be nice to know if we were gaining/losing time
+aggregateRun_ : Int -> Split -> ((Segment, Maybe Int), List TimingDatum) -> ((Segment, Maybe Int), List TimingDatum)
+aggregateRun_ now currentSplit ((last, lastTime), segs) =
+    let seg = .segment currentSplit
+        currentTime = Maybe.map (\t -> (T.posixToMillis t) - now) <| .endTime currentSplit
+        indiv = { seg | pb       = case (Maybe.map (\t -> t - (Maybe.withDefault 0 <| .pb last)) (.pb seg)) of
+                                 Nothing -> .pb last
+                                 x       -> x
+                      , gold     = case (Maybe.map (\t -> t - (Maybe.withDefault 0 <| .gold last)) (.gold seg)) of
+                                       Nothing -> .gold last
+                                       x       -> x
+                      , average  = case (Maybe.map (\t -> t - (Maybe.withDefault 0 <| .average last)) (.average seg)) of
+                                       Nothing -> .average last
+                                       x       -> x
+                      , worst    = case (Maybe.map (\t -> t - (Maybe.withDefault 0 <| .worst last)) (.worst seg)) of
+                                       Nothing -> .worst last
+                                       x       -> x
+                }
+        nextSegment = { seg | pb       = case .pb seg of
+                                             Nothing -> .pb last
+                                             x       -> x
+                            , gold     = case .gold seg of
+                                             Nothing -> .gold last
+                                             x       -> x
+                            , average  = case .average seg of
+                                             Nothing -> .average last
+                                             x       -> x
+                            , worst    = case .worst seg of
+                                             Nothing -> .worst last
+                                             x       -> x
+                            }
+        singleTime = Maybe.map2 (-) currentTime lastTime
+        nextTime = case currentTime of
+                       Nothing -> lastTime
+                       x -> x
+        tags = statusTags indiv seg singleTime currentTime
+    in ((nextSegment, nextTime), segs ++ [{segment = indiv, running = seg, singleTime = singleTime, currentSum = currentTime, timingTags = tags}])
+
+statusTags : Segment -> Segment -> Maybe Int -> Maybe Int -> List (String, Bool)
+statusTags indiv running singleTime currentTime =
+    case singleTime of
+        Nothing -> []
+        Just st -> case .gold indiv of
+            Nothing ->
+                [ ("gaining", True), ("ahead", True) ] -- No gold but active run means fresh split
+            Just g ->
+                if g > st
+                then [ ("gold", True) ]
+                else case .pb indiv of
+                    Just pb ->
+                        let gaining = st <= pb
+                            losing = pb < st
+                        in case .pb running of
+                            Nothing -> [ ("gaining", gaining), ("losing", losing), ("ahead", True) ]
+                            Just r  -> case currentTime of
+                                Nothing -> [ ("gaining", gaining), ("losing", losing), ("ahead", True) ]
+                                Just ct -> [ ("gaining", gaining), ("losing", losing), ("ahead", ct <= r), ("behind", ct > r)]
+                    Nothing -> []
+
+{- TIMER FUNCTIONS -}
+empty : Timer
+empty = Stopped empty_
+
+empty_ : Splits
+empty_ = { runStarted   = Nothing
+         , runEnded     = Nothing
+         , currentTime  = epoch
+         , title        = ""
+         , subtitle     = ""
+         , runTracker   = noSingleRun
+         }
+
+load : SplitsSpec -> Timer
+load newSplits = Stopped { empty_ | title = .title newSplits
+                                  , subtitle = .subtitle newSplits
+                                  , runTracker = (loadRun << .run) newSplits
+                         }
+
+loadRun : RunSpec -> RunTracker
+loadRun runSpec = case runSpec of
+    SingleCategorySpec segments -> SingleCategory segments
+    MultiCategorySpec  segments -> MultiCategory { previous = [], current = Nothing, upcoming = segments }
+
+start : Maybe Time -> Timer -> Timer
+start time t =
+    let currentTime = Just <| Maybe.withDefault (.currentTime <| splitsFor t) time
+    in case t of
+           Stopped s -> split currentTime <| Running { s | runStarted = Just <| .currentTime s }
+           Paused  s -> Running s
+           _         -> t
+
+-- TODO: Running/finished logic
+split : Maybe Time -> Timer -> Timer
+split time t =
+    let currentTime = Maybe.withDefault (.currentTime <| splitsFor t) time
+    in case t of
+        Running splits ->
+            case (.runTracker splits) of
+                SingleCategory _ ->
+                    let newt = ((mapT << mapR << split_) currentTime) t
+                    in case runFor newt of
+                        Nothing -> newt -- This is required to make this function total but should be unreachable
+                        Just r -> case (.current <| .splits r) of
+                            Nothing -> let news = splitsFor newt in Finished { news | runEnded = Just <| .currentTime news }
+                            Just _  -> newt
+                MultiCategory rs ->
+                    let newt = ((mapT << mapR << split_) currentTime) t
+                        news = splitsFor newt
+                    in case (.current rs) of
+                        Nothing -> newt -- This is required to make this function total but should never be reached
+                        Just r -> case (.current <| .splits r) of
+                            Just _  -> newt
+                            Nothing -> case (List.head <| .upcoming rs) of
+                                Nothing ->
+                                    let newRT = case (.runTracker news) of
+                                                    MultiCategory nrs -> MultiCategory { nrs | previous = (.previous nrs) ++ [r]
+                                                                                       , current  = Nothing
+                                                                                       }
+                                                    other -> other
+                                    in Finished { news | runTracker = newRT }
+                                next ->
+                                    let newRT = case (.runTracker news) of
+                                                    MultiCategory nrs -> MultiCategory { nrs | previous = (.previous nrs) ++ [r]
+                                                                                       , current  = next
+                                                                                       , upcoming = List.drop 1 (.upcoming nrs)
+                                                                                       }
+                                                    other -> other
+                                    in Running { news | runTracker = newRT }
+        _ -> t
+
+split_ : Time -> Run -> Run
+split_ t run =
+    let splits = .splits run
+        prev   = .previous splits
+        up     = .upcoming splits
     in
-        case b of
-            Just b_ -> Just (a, b_, c)
-            Nothing -> Nothing
+        case up of
+            [] -> case .current splits of
+                Nothing -> run
+                Just r  -> { run | splits   = { splits | previous = List.append prev [ { r | endTime = Just t } ]
+                                              ,          current = Nothing
+                                              }
+                                 , runEnded = Just t
+                           }
+            next :: rest -> case .current splits of
+                Nothing -> { run | splits     = { splits | current = Just next
+                                                ,          upcoming = rest
+                                                }
+                                 , runStarted = Just t
+                           }
+                Just r  -> { run | splits = { splits | previous = List.append prev [ { r | endTime = Just t } ]
+                                            ,          current = Just next
+                                            ,          upcoming = rest
+                                            }
+                           }
 
-timerSegment : Bool -> Int -> String
-timerSegment padTime i =
-    if padTime then String.pad 2 '0' <| String.fromInt i else String.fromInt i
+unsplit : Timer -> Timer
+unsplit t = case mapT (mapR unsplit_) t of
+    Finished r -> Running r
+    r -> r
 
--- "time from maybe"
-tfm : Maybe Int -> Int
-tfm mt = case mt of
-    Nothing -> 0
-    Just t  -> t
+unsplit_ : Run -> Run
+unsplit_ run =
+    let splits = .splits run
+        up = .upcoming splits
+    in case List.reverse <| .previous splits of
+        []      -> run
+        x :: xs -> case .current splits of
+            Nothing -> { run | splits = { splits | previous = List.reverse xs
+                                        ,          current = Just { x | endTime = Nothing }
+                                        }
+                       }
+            Just s  -> { run | splits = { splits | previous = List.reverse xs
+                                        ,          current = Just { x | endTime = Nothing }
+                                        ,          upcoming = { s | endTime = Nothing } :: up
+                                        }
+                       }
 
-timeStatus : (Int, Int) -> (Maybe Int, Maybe Int) -> TimeStatus
-timeStatus (elapsedTotal, segmentTime) (compareTotal, goldTime) =
-    case goldTime of
-        Nothing -> Gold
-        Just gt ->
-            if gt > segmentTime
-            then case compareTotal of
-                Nothing -> Gold
-                Just ct ->
-                    if elapsedTotal <= ct
-                    then Gold
-                    else BehindGold
-            else case compareTotal of
-                Nothing -> Ahead
-                Just ct ->
-                    if elapsedTotal <= ct
-                    then Ahead
-                    else Behind
+skip : Timer -> Timer
+skip = mapT (mapR skip_)
 
-pbSum : List Split -> Maybe Int
-pbSum xs =
-    let s = List.sum <| List.map (.segment >> .pb >> tfm) xs in
-        if s == 0 then Nothing else Just s
+skip_ : Run -> Run
+skip_ run =
+    let splits = .splits run
+        prev   = .previous splits
+        up     = .upcoming splits
+    in case up of
+        [] ->
+            run -- Cannot skip the final split of a run
+        next :: rest -> case .current splits of
+            Nothing -> run -- Cannot skip the first split of a run
+            Just r  -> { run | splits = { splits | previous = List.append prev [ { r | endTime = Nothing } ]
+                                        ,          current = Just next
+                                        ,          upcoming = rest
+                                        }
+                       }
 
-timeChange : TimeStatus -> Int -> Int -> TimeChange
-timeChange status current pb =
-    if current <= pb
-    then Gaining status
-    else Losing status
+splitsFor : Timer -> Splits
+splitsFor timer = case timer of
+    Stopped  s -> s
+    Paused   s -> s
+    Finished s -> s
+    Running  s -> s
 
-fmap : (a -> b) -> Maybe a -> Maybe b
-fmap f ma =
-    case ma of
-        Nothing -> Nothing
-        Just a  -> Just (f a)
+runFor : Timer -> Maybe Run
+runFor timer = case .runTracker <| splitsFor timer of
+    SingleCategory r -> Just r
+    MultiCategory rs -> case .current rs of
+                            Nothing -> List.head <| List.reverse <| .previous rs
+                            r -> r
 
-liftA2 : (a -> b -> c) -> Maybe a -> Maybe b -> Maybe c
-liftA2 f ma mb =
-    case ma of
-        Nothing -> Nothing
-        Just a ->
-            case mb of
-                Nothing -> Nothing
-                Just b -> Just <| f a b
+stop : Timer -> Timer
+stop t = Stopped <| splitsFor t
+
+reset : Timer -> Timer
+reset = stop >> (mapT reset_)
+
+reset_ : Splits -> Splits
+reset_ splits = { splits | runStarted = Nothing, runEnded = Nothing, runTracker = resetRunTracker <| .runTracker splits }
+
+resetRunTracker : RunTracker -> RunTracker
+resetRunTracker runTracker = case runTracker of
+    SingleCategory run -> SingleCategory <| resetRun run
+    MultiCategory runs -> MultiCategory (resetRuns runs)
+
+resetRun : Run -> Run
+resetRun run = { run | splits = resetSplitSet <| .splits run }
+
+resetRuns : RunSet -> RunSet
+resetRuns runs = { previous = [], current = Nothing, upcoming = List.map resetRun <| allRuns runs }
+
+resetSplitSet : SplitSet -> SplitSet
+resetSplitSet set = { previous = [], current = Nothing, upcoming = List.map resetSplit <| allSplits set }
+
+resetSplit : Split -> Split
+resetSplit s = { s | endTime = Nothing }
+
+    {-
+
+timeChange : Int -> Maybe Int -> Maybe Int -> TimeStatus -> TimeChange
+timeChange sum gold pb status =
+    if sum > 0
+    then let
+             isGold = case gold of
+                 Nothing -> True
+                 Just g  -> g > sum
+             change = case pb of
+                 Nothing -> Gaining status isGold
+                 Just p  -> if p > sum
+                            then Gaining status isGold
+                            else Losing status
+         in change
+    else Skipped -- This is required to make this function total but should never be reached
+
+timeSum : List TimeSpan -> Int
+timeSum ts = List.foldl (+) 0 <| List.map (\span -> .end span - .start span)
+
+-}
+
+allRuns : RunSet -> List Run
+allRuns set = case .current set of
+    Nothing -> List.append (.previous set) (.upcoming set)
+    Just r  -> List.concat [(.previous set), [r], (.upcoming set)]
+
+allSplits : SplitSet -> List Split
+allSplits set = case .current set of
+    Nothing -> List.append (.previous set) (.upcoming set)
+    Just s  -> List.concat [(.previous set), [s], (.upcoming set)]
+
+toJSON : Timer -> JE.Value
+toJSON timer = case (.runTracker << splitsFor) timer of
+    SingleCategory run -> runToJSON run -- TODO add rest of Splits object context
+    MultiCategory runs -> runsToJSON runs
+
+runsToJSON : RunSet -> JE.Value
+runsToJSON runs = JE.object [ ( "tag", JE.string "MultiCategoryRuns")
+                            , ( "runs", JE.list runToJSON <| allRuns runs )
+                            ]
+
+runToJSON : Run -> JE.Value
+runToJSON run =
+    let category = case (.entityID << .category) run of
+                       Nothing -> JE.null
+                       Just c  -> JE.int c
+        segments = List.filter (\x -> ((.entityID <| .segment x) /= Nothing) && ((.endTime x) /= Nothing) ) (allSplits <| .splits run)
+    in
+        JE.object [ ( "runCategory", category )
+                  , ( "segments", JE.list (segmentsJSON (T.posixToMillis <| Maybe.withDefault epoch <| .runStarted run)) segments )
+                  , ( "startTime", JE.int <| T.posixToMillis <| Maybe.withDefault epoch <| .runStarted run )
+                  , ( "endTime", JE.int <| T.posixToMillis <| Maybe.withDefault epoch <| .runEnded run )
+                  , ( "realTime", JE.int <| Maybe.withDefault 0 <| Maybe.map2 (\t1 t2 -> (T.posixToMillis t1) - (T.posixToMillis t2)) (.runEnded run) (.runStarted run) )
+                  ]
+
+segmentsJSON : Int -> Split -> JE.Value
+segmentsJSON offset segment = case .entityID <| .segment segment of
+    Nothing -> JE.null -- required to make the function total, filter before calling segmentsJSON
+    Just i  -> JE.object [ ( "segment", JE.int i ), ( "time", segmentsJSON_ offset <| .endTime segment ) ]
+
+segmentsJSON_ : Int -> Maybe Time -> JE.Value
+segmentsJSON_ o t = case t of
+    Nothing -> JE.null
+    Just i  -> JE.int <| (T.posixToMillis i) - o
+
+{- TIME SYNC FUNCTIONS -}
+setTime : Timer -> Time -> Timer
+setTime timer t = mapT (\s -> { s | currentTime = t }) timer
+
+{- DECODERS -}
+
+checkTag : String -> JD.Decoder a -> JD.Decoder a
+checkTag target da = checkTag_ (JD.at [ "data", "tag" ] JD.string) target da
+
+checkTag2 : String -> JD.Decoder a -> JD.Decoder a
+checkTag2 target da = checkTag_ (JD.at [ "data", "contents", "tag" ] JD.string) target da
+
+checkTag_ : JD.Decoder String -> String -> JD.Decoder a -> JD.Decoder a
+checkTag_ ds target da =
+    ds |> JD.andThen (\s -> if s == target then da else JD.fail ("No match on tag:" ++ s))
+
+gameDecoder : JD.Decoder Game
+gameDecoder =
+    JD.map4 Game ( JD.at [ "splitSetGameID" ] <| JD.maybe JD.int )
+                 ( JD.at [ "splitSetGameData", "gameName" ] JD.string )
+                 ( JD.at [ "splitSetGameData", "gameIcon" ] <| JD.nullable JD.string )
+                 ( JD.at [ "splitSetGameData", "gameDefaultOffset" ] JD.int )
+
+categoryDecoder : JD.Decoder Category
+categoryDecoder =
+    JD.map3 Category ( JD.at [ "splitSetCategoryID" ] <| JD.maybe JD.int )
+                     ( JD.at [ "splitSetCategoryData", "categoryName" ] JD.string )
+                     ( JD.at [ "splitSetCategoryData", "categoryOffset" ] JD.int )
+
+segmentDecoder : JD.Decoder Segment
+segmentDecoder =
+    JD.map7 Segment ( JD.at [ "segmentID" ] <| JD.maybe JD.int )
+                    ( JD.at [ "segmentName" ] JD.string )
+                    ( JD.at [ "segmentIcon" ] <| JD.nullable JD.string )
+                    ( JD.at [ "segmentPB" ] <| JD.nullable JD.int )
+                    ( JD.at [ "segmentGold" ] <| JD.nullable JD.int )
+                    ( JD.at [ "segmentAverage" ] <| JD.nullable JD.int )
+                    ( JD.at [ "segmentWorst" ] <| JD.nullable JD.int )
+
+segmentListDecoder : JD.Decoder SplitSet
+segmentListDecoder = JD.at [ "splitSetSegments" ] <|
+    JD.map (SplitSet [] Nothing) <| JD.list <|
+        JD.map (\x -> Split x Nothing) segmentDecoder
+
+runSpecDecoder : JD.Decoder RunSpec
+runSpecDecoder = JD.oneOf [ singleRunSpecDecoder, multiRunSpecDecoder ]
+
+runDecoder : JD.Decoder Run
+runDecoder =
+    JD.map3 (Run Nothing Nothing) ( JD.at [ "runGameData" ] gameDecoder )
+                                  ( JD.at [ "runCategoryData" ] categoryDecoder )
+                                  ( JD.at [ "runSplitsData" ] segmentListDecoder )
+
+singleRunSpecDecoder : JD.Decoder RunSpec
+singleRunSpecDecoder =
+    checkTag_ ( JD.at [ "tag" ] JD.string) "SingleCategorySpec" <|
+        JD.map SingleCategorySpec <| JD.at [ "runSpecData" ] runDecoder
+
+multiRunSpecDecoder : JD.Decoder RunSpec
+multiRunSpecDecoder =
+    checkTag_ ( JD.at [ "tag" ] JD.string) "MultiCategorySpec" <|
+        JD.map MultiCategorySpec <| JD.at [ "runSpecData" ] <| JD.list runDecoder

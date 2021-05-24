@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module View ( index, index' )
+module View ( index, index', viewIndex )
 where
 
 import Prelude
@@ -16,6 +16,12 @@ headerNormal = H.head $ do
     H.script ! A.src "/websocket.js" $ ""
     H.script ! A.src "/main.js" $ ""
 
+headerView :: Html
+headerView = H.head $ do
+    H.link ! A.rel "stylesheet" ! A.href "/view.css"
+    H.script ! A.src "/websocket.js" $ ""
+    H.script ! A.src "/view.js" $ ""
+
 headerFor :: String -> Html
 headerFor view = H.head $ do
     H.link ! A.rel "stylesheet" ! A.href (toValue ("/static/" ++ view ++ ".css"))
@@ -28,14 +34,24 @@ index :: Html
 index = html $ do
     headerNormal
     H.body $ H.div ! A.id "app" $ ""
-    H.script $ toHtml $ unlines [ "app = Elm.Main.init({node : document.getElementById('app'), flags : websocket_uri});"
-                                , "ElmWS.init(app);"
-                                ]
+    H.script ! A.type_ "module" $ toHtml $ unlines [ "import gamepad from '/gamepad.js';"
+                                                   , "var app = Elm.Main.init({node : document.getElementById('app'), flags : websocket_uri});"
+                                                   , "ElmWS.init(app);"
+                                                   , "gamepad(app);"
+                                                   ]
+
+viewIndex :: Html
+viewIndex = html $ do
+    headerView
+    H.body $ H.div ! A.id "app" $ ""
+    H.script ! A.type_ "module" $ toHtml $ unlines [ "var app = Elm.ViewOnly.init({node : document.getElementById('app'), flags : websocket_uri});"
+                                                   , "ElmWS.init(app);"
+                                                   ]
 
 index' :: String -> Html
 index' view = html $ do
     headerFor view
     H.body $ H.div ! A.id "app" $ ""
-    H.script $ toHtml $ unlines [ "app = Elm.Main.init({node : document.getElementById('app'), flags : websocket_uri});"
-                                , "ElmWS.init(app);"
-                                ]
+    H.script ! A.type_ "module" $ toHtml $ unlines [ "app = Elm.Main.init({node : document.getElementById('app'), flags : websocket_uri});"
+                                                   , "ElmWS.init(app);"
+                                                   ]

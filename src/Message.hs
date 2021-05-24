@@ -1,4 +1,8 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
 
 module Message where
 
@@ -10,6 +14,8 @@ import qualified Data.Text  as Text
 
 import qualified Data.Model as Model
 
+import Data.Aeson ( FromJSON(..), (.:), (.:?), withObject )
+
 data TimeState = TimeState { currentTime  :: Int
                            , previousOffset :: Maybe Int
                            } deriving ( Show, Generic )
@@ -19,9 +25,9 @@ type ConfigVal = Text.Text
 
 data SplitsCommand = RemoteStartSplit Int
                    | RemoteFinish SplitSet
-                   | RemoteUnsplit Int
-                   | RemoteSkip Int
-                   | RemoteStop Int
+                   | RemoteUnsplit
+                   | RemoteSkip
+                   | RemoteStop
                    | RemoteReset SplitSet
     deriving ( Show, Generic )
 
@@ -35,6 +41,7 @@ data Command = TimeSyncInit TimeState
              | NewClient
              | TimerControl SplitsCommand
              | Menu MenuCommand
+             | NewSplits NewSplitsSpec
              | SetConfig ConfigKey ConfigVal
              | FetchConfig ConfigKey
     deriving ( Show, Generic )
@@ -107,3 +114,58 @@ instance JSON.FromJSON SegmentData
 instance JSON.ToJSON SegmentData
 instance JSON.FromJSON LoadedSplits
 instance JSON.ToJSON LoadedSplits
+
+{- Here's the new stuff! -}
+
+data GameSpec = GameSpec { name :: Text.Text
+                         , icon :: Maybe Text.Text
+                         , offset :: Integer
+                         } deriving ( Show, Generic )
+
+instance FromJSON GameSpec where
+    parseJSON = withObject "GameSpec" $ \o -> do
+        name <- o .: "name"
+        icon <- o .:? "icon"
+        offset <- o .: "offset"
+        return GameSpec{..}
+
+data CategorySpec = CategorySpec { name :: Text.Text
+                                 , offset :: Integer
+                                 } deriving ( Show, Generic )
+
+instance FromJSON CategorySpec where
+    parseJSON = withObject "CategorySpec" $ \o -> do
+        name <- o .: "name"
+        offset <- o .: "offset"
+        return CategorySpec{..}
+
+data SegmentSpec = SegmentSpec { name :: Text.Text
+                               , icon :: Maybe Text.Text
+                               } deriving ( Show, Generic )
+
+instance FromJSON SegmentSpec where
+    parseJSON = withObject "GameSpec" $ \o -> do
+        name <- o .: "name"
+        icon <- o .:? "icon"
+        return SegmentSpec{..}
+
+data NewSplitsSpec = NewSplitsSpec { title :: Text.Text
+                                   , subtitle :: Text.Text
+                                   , game :: GameSpec
+                                   , category :: CategorySpec
+                                   , segments :: [SegmentSpec]
+                                   } deriving ( Show, Generic )
+
+instance FromJSON NewSplitsSpec where
+    parseJSON = withObject "NewSplitsSpec" $ \o -> do
+        title <- o .: "title"
+        subtitle <- o .: "subtitle"
+        game <- o .: "game"
+        category <- o .: "category"
+        segments <- o .: "segments"
+        return NewSplitsSpec{..}
+
+instance JSON.ToJSON GameSpec
+instance JSON.ToJSON CategorySpec
+instance JSON.ToJSON SegmentSpec
+instance JSON.ToJSON NewSplitsSpec

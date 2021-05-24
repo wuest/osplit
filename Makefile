@@ -20,7 +20,11 @@ static/main.js: $(ELM_SOURCES) elm.json
 	rm -rf dist*
 	elm make src/elm/Main.elm --output=static/main.js
 
-$(TARGET): $(ELM_SOURCES) static/main.js $(CABAL_FILE) $(HS_SOURCES)
+static/view.js: $(ELM_SOURCES) elm.json
+	rm -rf dist*
+	elm make src/elm/ViewOnly.elm --output=static/view.js
+
+$(TARGET): $(ELM_SOURCES) static/main.js static/view.js $(CABAL_FILE) $(HS_SOURCES)
 	cabal v2-build
 
 clean:

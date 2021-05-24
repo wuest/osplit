@@ -26,18 +26,36 @@ mainCSS = do
     setHeader "Content-Type" "text/css"
     text Const.mainCSS
 
+viewCSS :: Response
+viewCSS = do
+    setHeader "Content-Type" "text/css"
+    text Const.viewCSS
+
 mainJS :: Response
 mainJS = do
     setHeader "Content-Type" "application/javascript"
     text Const.mainJS
+
+viewJS :: Response
+viewJS = do
+    setHeader "Content-Type" "application/javascript"
+    text Const.viewJS
 
 websocketJS :: Response
 websocketJS = do
     setHeader "Content-Type" "application/javascript"
     text Const.websocketJS
 
+gamepadJS :: Response
+gamepadJS = do
+    setHeader "Content-Type" "application/javascript"
+    text Const.gamepadJS
+
 index :: Response
 index = blaze View.index
+
+viewIndex :: Response
+viewIndex = blaze View.viewIndex
 
 customIndex :: Response
 customIndex = do
@@ -51,9 +69,13 @@ routes = do
 
 -- Static Content
     get "/main.css" mainCSS
+    get "/view.css" viewCSS
     get "/main.js" mainJS
+    get "/view.js" viewJS
     get "/websocket.js" websocketJS
+    get "/gamepad.js" gamepadJS
 
 -- Public routes
     get "/" index
+    get "/view" viewIndex
     get "/view/:ref" customIndex
