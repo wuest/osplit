@@ -28,7 +28,7 @@ $(TARGET): $(ELM_SOURCES) static/main.js static/view.js $(CABAL_FILE) $(HS_SOURC
 	cabal v2-build
 
 clean:
-	rm -rf dist* static/main.js elm-stuff
+	rm -rf dist* static/{main,view}.js elm-stuff
 
 run: all
 	$(TARGET)

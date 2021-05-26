@@ -1,6 +1,6 @@
 html { font-size: 100%; }
 
-body { font-family: sans-serif; display: flex; height: 100%; margin: 0; }
+body { font-family: Verdana, sans-serif; display: flex; height: 100%; margin: 0; }
 
 /* Top-level containers */
 div#main-container { display: flex; flex-grow: 1; }
@@ -29,6 +29,7 @@ div#main-timer
   border-top: 1px solid gray; border-bottom: 1px solid gray;
   font-size: 3.25rem; font-weight: bold; letter-spacing: -4px;
   text-align: center; width: 100%;
+  font-family: Verdana, monospace;
 }
 
 div#main-timer.neutral        { background: -webkit-linear-gradient(#eee, #333); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
@@ -90,7 +91,8 @@ div.segments-header>div.header.running-diff.average { display: none; }
 div.segments-header>div.header.running-diff.worst   { display: none; }
 
 /* All individual split segments.  Use this to modify order/display properties/etc. */
-div.segment>div.split-column                  { display: none; flex-wrap: nowrap; flex-grow: 0; align-items: flex-end; padding-right: 2px; color: black; font-size: 1.25rem; font-weight: bold; text-align: right; }
+div.segment>div.split-column                  { display: none; flex-wrap: nowrap; flex-grow: 0; align-items: flex-end; padding-right: 2px; color: black; font-size: 1.25rem; font-weight: bold; }
+div.segment>div.split-column>span             { display: flex; margin-left: auto; }
 div.segment>div.segment-name                  { width: 100%; }
 
 div.segment.upcoming>div.pb                   { display: flex; width: 33%; order: 2; }
