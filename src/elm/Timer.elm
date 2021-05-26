@@ -44,8 +44,9 @@ type SplitStatus = Incomplete
                  | Skipped
                  | Completed Time
 
-type alias Split = { segment   : Segment
-                   , endTime   : Maybe Time
+type alias Split = { segment     : Segment
+                   , endTime     : Maybe Time
+                   , segmentTime : Maybe Time
                    }
 
 type alias SplitSet = { previous : List Split
@@ -138,6 +139,7 @@ emptySplitSet = { previous = []
                 , current  = Nothing
                 , upcoming = [ { segment = emptySegment
                                , endTime = Nothing
+                               , segmentTime = Nothing
                                }
                              ]
                 }
@@ -179,52 +181,52 @@ aggregateRun now r =
         current = case .current (.splits r) of
                       Nothing -> []
                       Just s  -> [s]
-        ((pastSegment, _), runningTotalsP) = List.foldl (aggregateRun_ now) ((initSegment, Just 0), []) previous
-        (currentSegment, runningTotalC_) = List.foldl (aggregateRun_ now) ((pastSegment, Nothing), []) current
+        zeroSegment = { initSegment | pb = Just 0, gold = Just 0, average = Just 0, worst = Just 0 }
+        ((sums1, pastSegment, _), runningTotalsP) = List.foldl (aggregateRun_ now) ((zeroSegment, initSegment, Just 0), []) previous
+        (currentSegment, runningTotalC_) = List.foldl (aggregateRun_ now) ((sums1, pastSegment, Nothing), []) current
         (_, runningTotalsU) = List.foldl (aggregateRun_ now) (currentSegment, []) upcoming
         runningTotalC = case runningTotalC_ of
                             [] -> Nothing
                             x :: _ -> Just x
     in { previous = runningTotalsP, current = runningTotalC, upcoming = runningTotalsU }
 
--- TODO
--- It would be nice to know if we were gaining/losing time
-aggregateRun_ : Int -> Split -> ((Segment, Maybe Int), List TimingDatum) -> ((Segment, Maybe Int), List TimingDatum)
-aggregateRun_ now currentSplit ((last, lastTime), segs) =
+-- PB is relative timestamp from the run; all other values are by-segment
+aggregateRun_ : Int -> Split -> ((Segment, Segment, Maybe Int), List TimingDatum) -> ((Segment, Segment, Maybe Int), List TimingDatum)
+aggregateRun_ now currentSplit ((sums, last, lastTime), segs) =
     let seg = .segment currentSplit
         currentTime = Maybe.map (\t -> (T.posixToMillis t) - now) <| .endTime currentSplit
         indiv = { seg | pb       = case (Maybe.map (\t -> t - (Maybe.withDefault 0 <| .pb last)) (.pb seg)) of
                                  Nothing -> .pb last
                                  x       -> x
-                      , gold     = case (Maybe.map (\t -> t - (Maybe.withDefault 0 <| .gold last)) (.gold seg)) of
-                                       Nothing -> .gold last
-                                       x       -> x
-                      , average  = case (Maybe.map (\t -> t - (Maybe.withDefault 0 <| .average last)) (.average seg)) of
-                                       Nothing -> .average last
-                                       x       -> x
-                      , worst    = case (Maybe.map (\t -> t - (Maybe.withDefault 0 <| .worst last)) (.worst seg)) of
-                                       Nothing -> .worst last
-                                       x       -> x
+                      , gold     = .gold seg
+                      , average  = .average seg
+                      , worst    = .worst seg
                 }
-        nextSegment = { seg | pb       = case .pb seg of
-                                             Nothing -> .pb last
-                                             x       -> x
-                            , gold     = case .gold seg of
-                                             Nothing -> .gold last
-                                             x       -> x
-                            , average  = case .average seg of
-                                             Nothing -> .average last
-                                             x       -> x
-                            , worst    = case .worst seg of
-                                             Nothing -> .worst last
-                                             x       -> x
+
+        nextSegment = { seg | pb      = case .pb seg of
+                                            Nothing -> .pb last
+                                            x       -> x
+                            , gold    = case .gold seg of
+                                            Nothing -> .gold last
+                                            x       -> x
+                            , average = case .average seg of
+                                            Nothing -> .average last
+                                            x       -> x
+                            , worst   = case .worst seg of
+                                            Nothing -> .worst last
+                                            x       -> x
                             }
+        sums_ = { sums | pb = .pb nextSegment
+                       , gold = Maybe.map ((+) (Maybe.withDefault 0 <| .gold seg)) <| .gold sums
+                       , average = Maybe.map ((+) (Maybe.withDefault 0 <| .average seg)) <| .average sums
+                       , worst = Maybe.map ((+) (Maybe.withDefault 0 <| .worst seg)) <| .worst sums
+                }
         singleTime = Maybe.map2 (-) currentTime lastTime
         nextTime = case currentTime of
                        Nothing -> lastTime
                        x -> x
         tags = statusTags indiv seg singleTime currentTime
-    in ((nextSegment, nextTime), segs ++ [{segment = indiv, running = seg, singleTime = singleTime, currentSum = currentTime, timingTags = tags}])
+    in ((sums_, nextSegment, nextTime), segs ++ [{segment = indiv, running = sums_, singleTime = singleTime, currentSum = currentTime, timingTags = tags}])
 
 statusTags : Segment -> Segment -> Maybe Int -> Maybe Int -> List (String, Bool)
 statusTags indiv running singleTime currentTime =
@@ -268,8 +270,21 @@ load newSplits = Stopped { empty_ | title = .title newSplits
 
 loadRun : RunSpec -> RunTracker
 loadRun runSpec = case runSpec of
-    SingleCategorySpec segments -> SingleCategory segments
-    MultiCategorySpec  segments -> MultiCategory { previous = [], current = Nothing, upcoming = segments }
+    SingleCategorySpec segments -> SingleCategory <| loadSegments segments
+    MultiCategorySpec  segments -> MultiCategory { previous = [], current = Nothing, upcoming = (List.map loadSegments segments) }
+
+loadSegments : Run -> Run
+loadSegments run =
+    let splitset = .splits run
+        (_, upcoming) = List.foldl buildSegmentSums (0, []) <| .upcoming splitset
+    in { run | splits = { splitset | upcoming = upcoming } }
+
+buildSegmentSums : Split -> (Int, List Split) -> (Int, List Split)
+buildSegmentSums nextSplit (runningTime, splits) =
+    let seg = .segment nextSplit
+        pb = Maybe.map ((+) runningTime) <| .pb seg
+        nextRunning = Maybe.withDefault runningTime pb
+    in (nextRunning, splits ++ [{ nextSplit | segment = { seg | pb = pb } }])
 
 start : Maybe Time -> Timer -> Timer
 start time t =
@@ -279,7 +294,6 @@ start time t =
            Paused  s -> Running s
            _         -> t
 
--- TODO: Running/finished logic
 split : Maybe Time -> Timer -> Timer
 split time t =
     let currentTime = Maybe.withDefault (.currentTime <| splitsFor t) time
@@ -320,14 +334,16 @@ split time t =
 
 split_ : Time -> Run -> Run
 split_ t run =
-    let splits = .splits run
-        prev   = .previous splits
-        up     = .upcoming splits
+    let splits        = .splits run
+        prev          = .previous splits
+        up            = .upcoming splits
+        segmentDiff   = List.foldl (\candidate lastKnown -> if (.endTime candidate) == Nothing then lastKnown else (.endTime candidate)) (.runStarted run) prev
+        singleSegment = Maybe.map (\t_ -> T.millisToPosix <| (T.posixToMillis t) - (T.posixToMillis t_)) segmentDiff
     in
         case up of
             [] -> case .current splits of
                 Nothing -> run
-                Just r  -> { run | splits   = { splits | previous = List.append prev [ { r | endTime = Just t } ]
+                Just r  -> { run | splits   = { splits | previous = List.append prev [ { r | endTime = Just t, segmentTime = singleSegment  } ]
                                               ,          current = Nothing
                                               }
                                  , runEnded = Just t
@@ -338,7 +354,7 @@ split_ t run =
                                                 }
                                  , runStarted = Just t
                            }
-                Just r  -> { run | splits = { splits | previous = List.append prev [ { r | endTime = Just t } ]
+                Just r  -> { run | splits = { splits | previous = List.append prev [ { r | endTime = Just t, segmentTime = singleSegment } ]
                                             ,          current = Just next
                                             ,          upcoming = rest
                                             }
@@ -357,12 +373,12 @@ unsplit_ run =
         []      -> run
         x :: xs -> case .current splits of
             Nothing -> { run | splits = { splits | previous = List.reverse xs
-                                        ,          current = Just { x | endTime = Nothing }
+                                        ,          current = Just { x | endTime = Nothing, segmentTime = Nothing }
                                         }
                        }
             Just s  -> { run | splits = { splits | previous = List.reverse xs
-                                        ,          current = Just { x | endTime = Nothing }
-                                        ,          upcoming = { s | endTime = Nothing } :: up
+                                        ,          current = Just { x | endTime = Nothing, segmentTime = Nothing }
+                                        ,          upcoming = { s | endTime = Nothing, segmentTime = Nothing } :: up
                                         }
                        }
 
@@ -379,7 +395,7 @@ skip_ run =
             run -- Cannot skip the final split of a run
         next :: rest -> case .current splits of
             Nothing -> run -- Cannot skip the first split of a run
-            Just r  -> { run | splits = { splits | previous = List.append prev [ { r | endTime = Nothing } ]
+            Just r  -> { run | splits = { splits | previous = List.append prev [ { r | endTime = Nothing, segmentTime = Nothing } ]
                                         ,          current = Just next
                                         ,          upcoming = rest
                                         }
@@ -423,29 +439,7 @@ resetSplitSet : SplitSet -> SplitSet
 resetSplitSet set = { previous = [], current = Nothing, upcoming = List.map resetSplit <| allSplits set }
 
 resetSplit : Split -> Split
-resetSplit s = { s | endTime = Nothing }
-
-    {-
-
-timeChange : Int -> Maybe Int -> Maybe Int -> TimeStatus -> TimeChange
-timeChange sum gold pb status =
-    if sum > 0
-    then let
-             isGold = case gold of
-                 Nothing -> True
-                 Just g  -> g > sum
-             change = case pb of
-                 Nothing -> Gaining status isGold
-                 Just p  -> if p > sum
-                            then Gaining status isGold
-                            else Losing status
-         in change
-    else Skipped -- This is required to make this function total but should never be reached
-
-timeSum : List TimeSpan -> Int
-timeSum ts = List.foldl (+) 0 <| List.map (\span -> .end span - .start span)
-
--}
+resetSplit s = { s | endTime = Nothing, segmentTime = Nothing }
 
 allRuns : RunSet -> List Run
 allRuns set = case .current set of
@@ -472,7 +466,7 @@ runToJSON run =
     let category = case (.entityID << .category) run of
                        Nothing -> JE.null
                        Just c  -> JE.int c
-        segments = List.filter (\x -> ((.entityID <| .segment x) /= Nothing) && ((.endTime x) /= Nothing) ) (allSplits <| .splits run)
+        segments = List.filter (\x -> ((.entityID <| .segment x) /= Nothing) && ((.segmentTime x) /= Nothing) ) (allSplits <| .splits run)
     in
         JE.object [ ( "runCategory", category )
                   , ( "segments", JE.list (segmentsJSON (T.posixToMillis <| Maybe.withDefault epoch <| .runStarted run)) segments )
@@ -484,12 +478,12 @@ runToJSON run =
 segmentsJSON : Int -> Split -> JE.Value
 segmentsJSON offset segment = case .entityID <| .segment segment of
     Nothing -> JE.null -- required to make the function total, filter before calling segmentsJSON
-    Just i  -> JE.object [ ( "segment", JE.int i ), ( "time", segmentsJSON_ offset <| .endTime segment ) ]
+    Just i  -> JE.object [ ( "segment", JE.int i ), ( "time", segmentsJSON_ <| .segmentTime segment ) ]
 
-segmentsJSON_ : Int -> Maybe Time -> JE.Value
-segmentsJSON_ o t = case t of
+segmentsJSON_ : Maybe Time -> JE.Value
+segmentsJSON_ t = case t of
     Nothing -> JE.null
-    Just i  -> JE.int <| (T.posixToMillis i) - o
+    Just i  -> JE.int <| T.posixToMillis i
 
 {- TIME SYNC FUNCTIONS -}
 setTime : Timer -> Time -> Timer
@@ -533,7 +527,7 @@ segmentDecoder =
 segmentListDecoder : JD.Decoder SplitSet
 segmentListDecoder = JD.at [ "splitSetSegments" ] <|
     JD.map (SplitSet [] Nothing) <| JD.list <|
-        JD.map (\x -> Split x Nothing) segmentDecoder
+        JD.map (\x -> Split x Nothing Nothing) segmentDecoder
 
 runSpecDecoder : JD.Decoder RunSpec
 runSpecDecoder = JD.oneOf [ singleRunSpecDecoder, multiRunSpecDecoder ]

@@ -353,7 +353,7 @@ addSegment_ : Timer.Run -> Timer.Run
 addSegment_ run =
     let s = .splits run
         newSegment = Timer.emptySegment
-        newSplit = [{ segment = { newSegment | name = "(New Segment)" }, endTime = Nothing }]
+        newSplit = [{ segment = { newSegment | name = "(New Segment)" }, endTime = Nothing, segmentTime = Nothing }]
     in { run | splits = { s | upcoming = (.upcoming s) ++ newSplit } }
 
 updateTitle : String -> Timer.Timer -> Timer.Timer
@@ -591,7 +591,7 @@ categoryDecoder = JD.map3 Timer.Category ( JD.at [ "splitSetCategoryID" ] <| JD.
 
 splitSetDecoder : JD.Decoder Timer.SplitSet
 splitSetDecoder = JD.map (Timer.SplitSet [] Nothing) <|
-    JD.list <| JD.map (\s -> Timer.Split s Nothing) <|
+    JD.list <| JD.map (\s -> Timer.Split s Nothing Nothing) <|
         JD.map7 Timer.Segment ( JD.field "segmentID" <| JD.maybe JD.int )
                               ( JD.field "segmentName" JD.string )
                               ( JD.field "segmentIcon" <| JD.maybe JD.string )
@@ -707,14 +707,14 @@ timeStatus timer =
             in case .current s of
                 Nothing -> case (List.reverse <| .previous s) of
                     [] -> [("neutral", True)] -- Run not yet started
-                    x :: xs -> let (sum, single) = currentSum (x :: xs)
+                    x :: xs -> let (sum, single) = currentSum (List.reverse <| x :: xs)
                                    finalTime = Maybe.withDefault currentTime (Maybe.map2 (\t1 t2 -> (T.posixToMillis t1) - (T.posixToMillis t2)) (.runEnded r) (.runStarted r))
                                in case single of
                                    Just singleTime -> [ ("ahead", sum >= finalTime), ("behind", sum < finalTime)
                                                       , ("gaining", singleTime <= ((Maybe.withDefault 0 (Maybe.map T.posixToMillis <| .endTime x)) - (Maybe.withDefault 0 (Maybe.map T.posixToMillis <| .runStarted r))))
                                                       , ("losing", singleTime > ((Maybe.withDefault 0 (Maybe.map T.posixToMillis <| .endTime x)) - (Maybe.withDefault 0 (Maybe.map T.posixToMillis <| .runStarted r))))
                                                       ]
-                                   Nothing -> [("neutral", True)] -- Impossible (except during multi-category runs in between categories) (TODO)
+                                   Nothing -> [("ahead", True), ("gaining", True)] -- Impossible (except during multi-category runs in between categories or first runs of a given category) (TODO)
                 Just x -> let (sum, single) = currentSum ((.previous s) ++ [x])
                           in case single of
                               Just singleTime -> [ ("ahead", sum >= currentTime), ("behind", sum < currentTime)
@@ -842,7 +842,7 @@ diffDatum d =
                             , average = sdiff s .average .singleTime
                             , worst =   sdiff s .worst .singleTime
                         }
-            , running = { r | pb =      sdiff r .gold .currentSum
+            , running = { r | pb =      sdiff r .pb .currentSum
                             , gold =    sdiff r .gold .currentSum
                             , average = sdiff r .average .currentSum
                             , worst =   sdiff r .worst .currentSum
@@ -853,7 +853,7 @@ splitSegment : Bool -> List String -> Maybe Int -> Html Msg
 splitSegment showSign tags i =
     let tags_ = List.map (\t -> (t, True)) tags
     in case i of
-           Nothing -> Html.div [ HA.classList (tags_ ++ [("split-column", True), ("segment-time", True)]) ] [ Html.text "-" ]
+           Nothing -> Html.div [ HA.classList (tags_ ++ [("split-column", True), ("segment-time", True)]) ] [ Html.span [] [ Html.span [ HA.class "time-separator" ] [ Html.text "-" ] ] ]
            Just t  -> Html.div [ HA.classList (tags_ ++ [("split-column", True), ("segment-time", True)]) ] [ showD showSign [] <| unitize t ]
 
 timerViewEdit : Timer.Timer -> Html Msg
