@@ -216,7 +216,7 @@ aggregateRun_ now currentSplit ((sums, last, lastTime), segs) =
                                             Nothing -> .worst last
                                             x       -> x
                             }
-        sums_ = { sums | pb = .pb nextSegment
+        sums_ = { sums | pb = .pb seg
                        , gold = Maybe.map ((+) (Maybe.withDefault 0 <| .gold seg)) <| .gold sums
                        , average = Maybe.map ((+) (Maybe.withDefault 0 <| .average seg)) <| .average sums
                        , worst = Maybe.map ((+) (Maybe.withDefault 0 <| .worst seg)) <| .worst sums
