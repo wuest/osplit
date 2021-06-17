@@ -95,6 +95,11 @@ div.segment>div.split-column                  { display: none; flex-wrap: nowrap
 div.segment>div.split-column>span             { display: flex; margin-left: auto; }
 div.segment>div.segment-name                  { width: 100%; }
 
+div.segment span.time-hours.time-empty                      { display: none; }
+div.segment span.time-hours-separator.time-empty            { display: none; }
+div.segment.previous span.time-minutes.time-empty           { display: none; }
+div.segment.previous span.time-minutes-separator.time-empty { display: none; }
+
 div.segment.upcoming>div.pb                   { display: flex; width: 33%; order: 2; }
 div.segment.upcoming>div.gold                 { display: flex; width: 33%; order: 1; }
 div.segment.upcoming>div.average              { display: none; }
@@ -143,11 +148,11 @@ div.segment.previous>div.running.gold         { display: none; }
 div.segment.previous>div.running.average      { display: none; }
 div.segment.previous>div.running.worst        { display: none; }
 div.segment.previous>div.running.split        { display: flex; width: 33%; order: 3; }
-div.segment.previous>div.diff.pb              { display: flex; width: 33%; order: 2; }
+div.segment.previous>div.diff.pb              { display: none; }
 div.segment.previous>div.diff.gold            { display: flex; width: 33%; order: 1; }
 div.segment.previous>div.diff.average         { display: none; }
 div.segment.previous>div.diff.worst           { display: none; }
-div.segment.previous>div.running-diff.pb      { display: none; }
+div.segment.previous>div.running-diff.pb      { display: flex; width: 33%; order: 2; }
 div.segment.previous>div.running-diff.gold    { display: none; }
 div.segment.previous>div.running-diff.average { display: none; }
 div.segment.previous>div.running-diff.worst   { display: none; }

@@ -52,8 +52,6 @@ div#splits-container { display: flex; flex-direction: column; flex-grow: 1; }
 div.segments-header            { }
 div.segments-header>div.header { align-items: center; display: inline; justify-content: center; }
 
-div.split-column                     { display: inline; }
-
 /* Display of segments */
 div.segment                  { display: flex; flex-wrap: wrap; padding-top: 0.5ex; }
 div.segment div.segment-name { padding-left: 0.2rem; color: white; font-size: 1.15rem; font-weight: bold; }
@@ -64,10 +62,10 @@ div.segment.even            { background-color: rgba(0, 0, 0, 0.20); }
 div.segment.current        { background-color: rgba(0, 128, 255, 0.25) !important; }
 
 /* Colors for +/- splits */
-div.segment.ahead.gaining  { -webkit-text-fill-color: #007000; text-shadow: 0px 0px 4px black; }
-div.segment.ahead.losing   { -webkit-text-fill-color: #009000; text-shadow: 0px 0px 4px black; }
-div.segment.behind.gaining { -webkit-text-fill-color: #800000; text-shadow: 0px 0px 4px black; }
-div.segment.behind.losing  { -webkit-text-fill-color: #700000; text-shadow: 0px 0px 4px black; }
+div.segment.ahead.gaining  { -webkit-text-fill-color: #00F000; text-shadow: 0px 0px 4px black; }
+div.segment.ahead.losing   { -webkit-text-fill-color: #60C030; text-shadow: 0px 0px 4px black; }
+div.segment.behind.gaining { -webkit-text-fill-color: #F06060; text-shadow: 0px 0px 4px black; }
+div.segment.behind.losing  { -webkit-text-fill-color: #F00000; text-shadow: 0px 0px 4px black; }
 div.segment.gold           { -webkit-text-fill-color: #FFD700; text-shadow: 0px 0px 4px black; }
 
 /* Headers */
@@ -96,6 +94,18 @@ div.segments-header>div.header.running-diff.worst   { display: none; }
 div.segment>div.split-column                  { display: none; flex-wrap: nowrap; flex-grow: 0; align-items: flex-end; color: white; font-size: 1.35rem; font-weight: bold; }
 div.segment>div.split-column>span             { display: flex; margin-left: auto; }
 div.segment>div.segment-name                  { width: 100%; }
+
+span.time-minutes-nolead { display: none; }
+span.time-seconds-nolead { display: none; }
+div.segment span.time-hours.time-empty                      { display: none; }
+div.segment span.time-hours-separator.time-empty            { display: none; }
+div.segment.previous span.time-minutes.time-empty           { display: none; }
+div.segment.previous span.time-minutes-separator.time-empty { display: none; }
+div.segment.previous span.time-minutes                      { display: none; }
+div.segment.previous span.time-minutes-nolead               { display: initial; }
+div.segment.previous span.time-minutes-nolead.time-empty    { display: none; }
+div.segment.previous span.time-minutes.time-empty ~ span.time-seconds { display: none; }
+div.segment.previous span.time-minutes.time-empty ~ span.time-seconds-nolead { display: initial; }
 
 div.segment.upcoming>div.pb                   { display: flex; width: 33%; order: 2; }
 div.segment.upcoming>div.gold                 { display: flex; width: 33%; order: 1; }
@@ -145,11 +155,11 @@ div.segment.previous>div.running.gold         { display: none; }
 div.segment.previous>div.running.average      { display: none; }
 div.segment.previous>div.running.worst        { display: none; }
 div.segment.previous>div.running.split        { display: flex; width: 33%; order: 3; }
-div.segment.previous>div.diff.pb              { display: flex; width: 33%; order: 2; }
+div.segment.previous>div.diff.pb              { display: none; }
 div.segment.previous>div.diff.gold            { display: flex; width: 33%; order: 1; }
 div.segment.previous>div.diff.average         { display: none; }
 div.segment.previous>div.diff.worst           { display: none; }
-div.segment.previous>div.running-diff.pb      { display: none; }
+div.segment.previous>div.running-diff.pb      { display: flex; width: 33%; order: 2; }
 div.segment.previous>div.running-diff.gold    { display: none; }
 div.segment.previous>div.running-diff.average { display: none; }
 div.segment.previous>div.running-diff.worst   { display: none; }
