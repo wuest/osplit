@@ -140,7 +140,9 @@ processCommand (Message.TimerControl Message.RemoteStop) clientId stateRef = do
 processCommand (Message.TimerControl (Message.RemoteReset s)) clientId stateRef = do
     _ <- saveRun False s
     return $ ackResponse
-    newSplits <- loadSplits $ Message.runCategory s
+    newSplits <- case s of
+                     Message.SingleRun c _ _ _ _ -> loadSplits c
+                     Message.MultiSet c _ _ _ _ -> loadMultiCategorySplits c
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ reset
     liftIO $ sendFrom (negate 1) stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
     return ackResponse
@@ -156,10 +158,18 @@ processCommand (Message.Menu Message.MenuCloseSplits) clientId stateRef = do
     return ackResponse
 processCommand (Message.Menu Message.MenuGames) _ stateRef = gameList
 processCommand (Message.Menu (Message.MenuCategories i)) clientId stateRef = categoryList i
+processCommand (Message.Menu (Message.MenuFullCategories)) clientId stateRef = fullCategoryList
 
 processCommand (Message.Menu (Message.MenuLoadSplits c)) clientId stateRef = do
     Store.set "splits.active_splits" c
     newSplits <- loadSplits c
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
+    return newSplits
+
+-- TODO Config store management needs to support multi/single-category
+processCommand (Message.Menu (Message.MenuLoadMultiCategory c)) clientId stateRef = do
+    --Store.set "splits.active_splits" c
+    newSplits <- loadMultiCategorySplits c
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
     return newSplits
 
@@ -183,6 +193,13 @@ processCommand (Message.NewSplits (Message.NewSplitsSpec title subtitle game' ca
     liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
     return newSplits
 
+processCommand (Message.NewMultiCategorySplits (Message.NewMultiCategorySpec title categories)) clientId stateRef = do
+    category <- createMultiCategory title
+    mapM_ (addCategoryToMultiCategoryRun category) categories
+    newSplits <- loadMultiCategorySplits $ fromIntegral . SQL.fromSqlKey $ category
+    liftIO $ sendFrom clientId stateRef $ (toStrict . decodeUtf8 . JSON.encode) $ newSplits
+    return newSplits
+
 processCommand _ _ _ = return unsupportedResponse
 
 startSplit :: Int -> Message.Response
@@ -198,7 +215,7 @@ stopSplits :: Message.Response
 stopSplits = Message.RemoteControl Message.RemoteStop
 
 reset :: Message.Response
-reset = Message.RemoteControl (Message.RemoteReset (Message.SplitSet (negate 1) [] 0 0 0))
+reset = Message.RemoteControl (Message.RemoteReset (Message.SingleRun (negate 1) [] 0 0 0))
 
 ackResponse :: Message.Response
 ackResponse = Message.Raw { Message.respType = "ack", Message.respData = "[]" }
@@ -212,7 +229,8 @@ closeSplits = Message.CloseSplits
 gameList :: DB.DBPoolM Message.Response
 gameList = do
     games <- DB.run $ SQL.selectList [] [] :: DB.DBPoolM [SQL.Entity Model.Game]
-    return $ Message.GameList $ fmap gameList' games
+    multi <- DB.run $ SQL.selectList [] [] :: DB.DBPoolM [SQL.Entity Model.MultiCategory]
+    return $ Message.GameList $ Message.TopList (fmap gameList' games) (fmap multiList multi)
 
 gameList' :: SQL.Entity Model.Game -> Message.Game
 gameList' g = do
@@ -220,16 +238,45 @@ gameList' g = do
         gameId = fromIntegral . SQL.fromSqlKey . entityKey $ g
       in Message.Game gameId game
 
+multiList :: SQL.Entity Model.MultiCategory -> Message.MultiCategory
+multiList m = do
+    let mc = entityVal m
+        mcId = fromIntegral . SQL.fromSqlKey . entityKey $ m
+      in Message.MultiCategory mcId $ Model.multiCategoryName mc
+
 categoryList :: Int -> DB.DBPoolM Message.Response
 categoryList game = do
     games <- DB.run $ SQL.selectList [ Model.CategoryGame ==. (SQL.toSqlKey $ fromIntegral game) ] []
     return $ Message.CategoryList $ fmap categoryList' games
 
 categoryList' :: SQL.Entity Model.Category -> Message.Category
-categoryList' c = do
+categoryList' c =
     let cat = entityVal c
         cid = fromIntegral . SQL.fromSqlKey . entityKey $ c
       in Message.Category cid cat
+
+-- TODO: This is very inefficient.  Games will be re-selected multiple times.
+-- I blame rapid prototyping; I'll get back to fixing this in "the" "future."
+fullCategoryList :: DB.DBPoolM Message.Response
+fullCategoryList = do
+    categories <- DB.run $ SQL.selectList [] [] :: DB.DBPoolM [SQL.Entity Model.Category]
+    loaded <- mapM fullCategoryList' categories
+    return $ Message.FullCategoryList $ Monad.join loaded
+
+-- Note: this is very similar to loadSplits' below.  This could be generalized.
+fullCategoryList' :: SQL.Entity Model.Category -> DB.DBPoolM ([Message.LoadedSplits])
+fullCategoryList' c = do
+    let cat  = entityVal c
+        cid  = fromIntegral . SQL.fromSqlKey . entityKey $ c
+        game = Model.categoryGame cat
+    games <- DB.run $ SQL.selectList [ Model.GameId ==. game ] []
+    return $ fmap (fullCategoryList'' cid cat) games
+
+fullCategoryList'' :: Int -> Model.Category -> SQL.Entity Model.Game -> Message.LoadedSplits
+fullCategoryList'' cid cat g =
+    let game = entityVal g
+        gid  = fromIntegral . SQL.fromSqlKey . entityKey $ g
+    in Message.LoadedSplits gid game cid cat []
 
 loadSplits :: Int -> DB.DBPoolM Message.Response
 loadSplits cid = do
@@ -255,6 +302,36 @@ loadSplits'' (g:_) cid cat = do
     segments <- DB.run $ SQL.selectList [ Model.SegmentCategory ==. (SQL.toSqlKey $ fromIntegral cid) ] []
     segments' <- mapM segmentData segments
     return $ Just $ Message.LoadedSplits gid game cid cat segments'
+
+loadMultiCategorySplits :: Int -> DB.DBPoolM Message.Response
+loadMultiCategorySplits cid = do
+    category <- DB.run $ SQL.selectList [ Model.MultiCategoryId ==. (SQL.toSqlKey $ fromIntegral cid) ] []
+    loaded <- loadMultiCategorySplits' category
+    return $ Message.MultiCategoryRefresh loaded
+
+loadMultiCategorySplits' :: [SQL.Entity Model.MultiCategory] -> DB.DBPoolM Message.LoadedMultiCategory
+loadMultiCategorySplits' [] = return $ Message.LoadedMultiCategory (negate 1) "" []
+loadMultiCategorySplits' (c:_) = do
+    let mc = entityVal c
+        mid = fromIntegral . SQL.fromSqlKey . entityKey $ c
+        title = Model.multiCategoryName mc
+    catIDs <- DB.run $ SQL.selectList [ Model.MultiCategoryEntryParent ==. (entityKey c) ] []
+    categories <- mapM loadMultiCategorySplits'' catIDs
+    categories' <- mapM fullCategoryList' $ Monad.join categories
+    categories'' <- mapM populateSegments $ Monad.join categories'
+    return $ Message.LoadedMultiCategory mid title categories''
+
+populateSegments :: Message.LoadedSplits -> DB.DBPoolM Message.LoadedSplits
+populateSegments (Message.LoadedSplits gid game cid cat _) = do
+    segments <- DB.run $ SQL.selectList [ Model.SegmentCategory ==. (SQL.toSqlKey $ fromIntegral cid) ] []
+    segments' <- mapM segmentData segments
+    return $ Message.LoadedSplits gid game cid cat segments'
+
+loadMultiCategorySplits'' :: SQL.Entity Model.MultiCategoryEntry -> DB.DBPoolM [SQL.Entity Model.Category]
+loadMultiCategorySplits'' entry = do
+    let val = entityVal entry
+        cid = Model.multiCategoryEntryCategory val
+    DB.run $ SQL.selectList [ Model.CategoryId ==. cid ] []
 
 -- This is N+1 as heck and it's gross and bad and I hate it, but I want it
 -- working before I worry about making it not awful.
@@ -284,13 +361,21 @@ segmentDataPB (run:_) skey = do
       False -> Just . Model.splitElapsed . entityVal $ head segment
 
 saveRun :: Bool -> Message.SplitSet -> DB.DBPoolM ()
-saveRun finished (Message.SplitSet cat segments start end realTime) = do
+saveRun finished (Message.SingleRun cat segments start end realTime) = do
     let c       = SQL.toSqlKey $ fromIntegral cat
         s       = millisToUTCTime start
         e       = millisToUTCTime end
         attempt = Model.Attempt c s False e False realTime finished -- TODO: BUG: Fix NTP syncing for this
     attemptID <- DB.run $ SQL.insert attempt
     mapM_ (saveSegment attemptID) segments
+    return ()
+saveRun finished (Message.MultiSet parentCategory runs start end realTime) = do
+    let s       = millisToUTCTime start
+        e       = millisToUTCTime end
+        pid     = SQL.toSqlKey . fromIntegral $ parentCategory
+        attempt = Model.MultiCategoryAttempt pid s False e False realTime finished
+    _ <- DB.run $ SQL.insert_ attempt
+    mapM_ (uncurry saveRun) runs
     return ()
 
 saveSegment :: Model.Key Model.Attempt -> Message.SegmentTime -> DB.DBPoolM ()
@@ -317,5 +402,11 @@ createFetchGame (Message.GameSpec name icon offset) = do
 createCategory :: Model.Key Model.Game -> Message.CategorySpec -> DB.DBPoolM (Model.Key Model.Category)
 createCategory g (Message.CategorySpec name offset) = DB.run $ SQL.insert $ Model.Category name g (fromIntegral offset)
 
+createMultiCategory :: Text.Text -> DB.DBPoolM (Model.Key Model.MultiCategory)
+createMultiCategory name = DB.run $ SQL.insert $ Model.MultiCategory name
+
 createSegment :: Model.Key Model.Category -> Message.SegmentSpec -> DB.DBPoolM ()
 createSegment cat (Message.SegmentSpec name icon) = DB.run $ SQL.insert_ $ Model.Segment cat name icon
+
+addCategoryToMultiCategoryRun :: Model.Key Model.MultiCategory -> Integer -> DB.DBPoolM ()
+addCategoryToMultiCategoryRun parent cid = DB.run $ SQL.insert_ $ Model.MultiCategoryEntry parent (SQL.toSqlKey $ fromIntegral cid)

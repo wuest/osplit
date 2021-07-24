@@ -30,6 +30,14 @@ type alias Displayable = { hours   : Int
                          , sign    : String
                          }
 
+type alias MultiCategoryInfo = { name : String
+                               , entityID : Int
+                               }
+
+type alias FullGameList = { gameList : List Timer.Game
+                          , multiCategoryList : List MultiCategoryInfo
+                          }
+
 type Msg = OpenSocket String
          | SendSocket JE.Value
          | SocketOpened WS.Socket
@@ -47,15 +55,19 @@ type Msg = OpenSocket String
          | RemapGamepadToggle
          | ListGames
          | ListCategories (Maybe Int)
+         | LoadMultiCategory Int
          | LoadSplits (Maybe Int)
          | CloseSplits
          | EditSplits
          | EditSplitsSave
          | EditSplitsCancel
+         | UpdateMultiCategory Bool
          | UpdateSegmentName Int String
          | UpdateTitle String
          | UpdateSubtitle String
+         | UpdateSelectedGame Int String
          | AddSegment
+         | AddGame
          -- Timer Controls
          | StartSplit (Maybe T.Posix)
          | Unsplit
@@ -68,8 +80,9 @@ type Msg = OpenSocket String
 type WebsocketMessage = ClientStateRequest Int
                       | SplitsControl SplitsMessage
                       | UnloadSplits
-                      | FetchedGameList (List Timer.Game)
+                      | FetchedGameList FullGameList
                       | FetchedCategoryList (List Timer.Category)
+                      | FullCategoryList (List Timer.RunSpec)
                       | FetchedSplits Timer.SplitsSpec
                       | ConfigStoreSet CSKey CSVal
 
@@ -79,20 +92,23 @@ type SplitsMessage = RemoteStartSplit Int
                    | RemoteStop
                    | RemoteReset
 
-type alias Model = { socket           : Maybe WS.Socket
-                   , timer            : Timer.Timer
-                   , backupTimer      : Maybe Timer.Timer
-                   , splitsMode       : SplitsMode
-                   , menu             : MenuStatus
-                   , gameList         : List Timer.Game
-                   , categoryList     : List Timer.Category
-                   , keyboardStatus   : List KB.Key
-                   , keyboardMap      : KeyboardMapping
-                   , gamepadMap       : GamepadMapping
-                   , gamepadState     : GamepadState
-                   , userMappings     : UserMappings
-                   , configStore      : ConfigStore
-                   , maxSegmentsShown : Int
+type alias Model = { socket            : Maybe WS.Socket
+                   , timer             : Timer.Timer
+                   , backupTimer       : Maybe Timer.Timer
+                   , splitsMode        : SplitsMode
+                   , menu              : MenuStatus
+                   , gameList          : List Timer.Game
+                   , multiCategoryList : List MultiCategoryInfo
+                   , categoryList      : List Timer.Category
+                   , keyboardStatus    : List KB.Key
+                   , keyboardMap       : KeyboardMapping
+                   , gamepadMap        : GamepadMapping
+                   , gamepadState      : GamepadState
+                   , userMappings      : UserMappings
+                   , configStore       : ConfigStore
+                   , maxSegmentsShown  : Int
+                   , editMulticategory : Bool
+                   , fullCategoryList  : List Timer.RunSpec
                    }
 
 type GamepadState = Uninitialized
@@ -129,6 +145,7 @@ init url = ( { socket = Nothing
              , splitsMode = NormalSplitsView
              , menu = MenuHidden
              , gameList = []
+             , multiCategoryList = []
              , categoryList = []
              , keyboardStatus = []
              , keyboardMap = defaultKeyboardMap
@@ -137,6 +154,8 @@ init url = ( { socket = Nothing
              , userMappings = Gamepad.Advanced.emptyUserMappings
              , configStore = Dict.empty
              , maxSegmentsShown = 10
+             , editMulticategory = False
+             , fullCategoryList = []
              }
            , Cmd.batch [WS.open url, GamepadPort.load]
            )
@@ -252,12 +271,19 @@ update msg model =
             ({ model | timer = Maybe.withDefault Timer.empty <| .backupTimer model, menu = MenuHidden, splitsMode = NormalSplitsView }, Cmd.none) -- backupTimer *SHOULD* not ever be Nothing in this case
         UpdateSegmentName i n ->
             ({ model | timer = updateSegmentName i n <| .timer model }, Cmd.none)
+        UpdateSelectedGame i c ->
+            ({ model | timer = updateSelectedCategory (.fullCategoryList model) i (Maybe.withDefault -1 <| String.toInt c) (.timer model) }, Cmd.none)
         UpdateTitle n ->
             ({ model | timer = updateTitle n <| .timer model }, Cmd.none)
         UpdateSubtitle n ->
             ({ model | timer = updateSubtitle n <| .timer model }, Cmd.none)
+        UpdateMultiCategory m -> -- TODO this should really just be empty always when we're editing anyway...
+            let timerContainer = if m then Timer.emptyMulti else Timer.empty
+            in ({ model | editMulticategory = m, timer = timerContainer }, send (.socket model) fullCategoryListRequestJSON)
         AddSegment  ->
             ({ model | timer = addSegment <| .timer model }, Cmd.none)
+        AddGame ->
+            ({ model | timer = addGame <| .timer model }, Cmd.none)
         EditSplitsSave ->
             (model, splitsSave (.socket model) (Timer.splitsFor <| .timer model))
         ListGames ->
@@ -265,6 +291,8 @@ update msg model =
         ListCategories _ ->
             ({ model | menu = MenuVisible CategoryList, categoryList = [] }, broadcastIntent (.socket model) msg)
         LoadSplits _ ->
+            ({ model | menu = MenuHidden }, broadcastIntent (.socket model) msg)
+        LoadMultiCategory _ ->
             ({ model | menu = MenuHidden }, broadcastIntent (.socket model) msg)
         InputConfig ->
             ({ model | menu = MenuVisible Config }, Cmd.none)
@@ -284,24 +312,25 @@ update msg model =
 
 timerControl : Bool -> Model -> Msg -> (Model, Cmd Msg)
 timerControl broadcast model msg =
-    let msg_ = if broadcast then broadcastIntent (.socket model) msg else Cmd.none
-    in case msg of
-       StartSplit t ->
-           let offsetTime = Maybe.map (\time -> T.millisToPosix <| (T.posixToMillis time) - (Maybe.withDefault 0 (Maybe.map T.posixToMillis <| .runStarted <| Timer.splitsFor <| .timer model))) t
-               msg2 = if broadcast then broadcastIntent (.socket model) (StartSplit offsetTime) else Cmd.none
-           in case .splitsMode model of
-                  EditSplitsView -> (model, Cmd.none)
-                  NormalSplitsView -> case .timer model of
-                      Timer.Running _  -> ({ model | timer = Timer.split t <| .timer model }, msg2)
-                      Timer.Finished _ -> ({ model | timer = Timer.reset <| .timer model }, send (.socket model) (finishSplitsRequestJSON <| .timer model))
-                      _                -> ({ model | timer = Timer.start t <| .timer model }, msg2)
-       Reset _ ->
-           ({ model | timer = Timer.reset <| .timer model }, msg_)
-       Unsplit ->
-           ({ model | timer = Timer.unsplit <| .timer model }, msg_)
-       Skip ->
-           ({ model | timer = Timer.skip <| .timer model }, msg_)
-       _ -> (model, Cmd.none)
+    case .splitsMode model of
+        EditSplitsView -> (model, Cmd.none)
+        NormalSplitsView ->
+            let msg_ = if broadcast then broadcastIntent (.socket model) msg else Cmd.none
+            in case msg of
+               StartSplit t ->
+                   let offsetTime = Maybe.map (\time -> T.millisToPosix <| (T.posixToMillis time) - (Maybe.withDefault 0 (Maybe.map T.posixToMillis <| .runStarted <| Timer.splitsFor <| .timer model))) t
+                       msg2 = if broadcast then broadcastIntent (.socket model) (StartSplit offsetTime) else Cmd.none
+                   in case .timer model of
+                          Timer.Running _  -> ({ model | timer = Timer.split t <| .timer model }, msg2)
+                          Timer.Finished _ -> ({ model | timer = Timer.reset <| .timer model }, send (.socket model) (finishSplitsRequestJSON <| .timer model))
+                          _                -> ({ model | timer = Timer.start t <| .timer model }, msg2)
+               Reset _ ->
+                   ({ model | timer = Timer.reset <| .timer model }, msg_)
+               Unsplit ->
+                   ({ model | timer = Timer.unsplit <| .timer model }, msg_)
+               Skip ->
+                   ({ model | timer = Timer.skip <| .timer model }, msg_)
+               _ -> (model, Cmd.none)
 
 {- TODO Adapted from Gamepad.elm example -}
 remapGamepad : Model -> Gamepad.Advanced.Msg -> ( Model, Cmd Msg )
@@ -346,6 +375,31 @@ updateSegmentName_ i n run =
                                                                               else splitlist ++ [split]
                                                     ) [] <| List.indexedMap Tuple.pair <| (.upcoming s) } }
 
+updateSelectedCategory : List Timer.RunSpec -> Int -> Int -> Timer.Timer -> Timer.Timer
+updateSelectedCategory rss i c =
+        let cs = List.foldl (\spec categories ->
+                                case spec of
+                                    Timer.SingleCategorySpec r -> (.category r) :: categories
+                                    Timer.MultiCategorySpec _ rs -> (List.map .category rs) ++ categories
+                            ) [] rss
+        in Timer.mapT (updateSelectedCategory_ cs i c)
+
+updateSelectedCategory_ : List Timer.Category -> Int -> Int -> Timer.Splits -> Timer.Splits
+updateSelectedCategory_ cs i c s =
+    case .runTracker s of
+        Timer.SingleCategory _ -> s
+        Timer.MultiCategory rs ->
+            let r = .upcoming rs
+                m = Timer.MultiCategory <| { rs | upcoming = List.foldl (\(j, run) runList -> if i == j
+                                                                                              then
+                                                                                                  case List.head <| List.filter (\cat -> (.entityID cat) == (Just c)) cs
+                                                                                                      of Nothing -> runList ++ [run]
+                                                                                                         Just c_ -> runList ++ [{ run | category = c_ }]
+                                                                                              else runList ++ [run]
+                                                                        ) [] <| List.indexedMap Tuple.pair r
+                                           }
+            in { s | runTracker = m }
+
 addSegment : Timer.Timer -> Timer.Timer
 addSegment = Timer.mapT <| Timer.mapR addSegment_
 
@@ -355,6 +409,17 @@ addSegment_ run =
         newSegment = Timer.emptySegment
         newSplit = [{ segment = { newSegment | name = "(New Segment)" }, endTime = Nothing, segmentTime = Nothing }]
     in { run | splits = { s | upcoming = (.upcoming s) ++ newSplit } }
+
+addGame : Timer.Timer -> Timer.Timer
+addGame = Timer.mapT addGame_
+
+addGame_ : Timer.Splits -> Timer.Splits
+addGame_ s =
+    case .runTracker s of
+        Timer.MultiCategory rt ->
+            let newRun = [Timer.noRun]
+            in { s | runTracker = Timer.MultiCategory <| { rt | upcoming = (.upcoming rt) ++ newRun } }
+        _ -> s -- This should be unreachable, but is required in order to make this function total.
 
 updateTitle : String -> Timer.Timer -> Timer.Timer
 updateTitle n = Timer.mapT (updateTitle_ n)
@@ -404,23 +469,50 @@ broadcastIntent ms msg = case msg of
     LoadSplits c -> case c of
         Nothing -> Cmd.none
         Just c_ -> send ms <| splitsLoadRequestJSON c_
+    LoadMultiCategory c -> send ms <| multiCategoryLoadRequest c
     -- Anything not explicitly matched can be safely ignored
     _                -> Cmd.none
 
 splitsSave : Maybe WS.Socket -> Timer.Splits -> Cmd Msg
 splitsSave ms s =
     case .runTracker s of
+        -- TODO: This should be done as part of the editing phase.  Cest la vie
         Timer.SingleCategory r ->
-            let game = .game r
-                cat = .category r
-                segs = List.map .segment <| .upcoming <| .splits r
-                gameSpec = JE.object [ ( "name", JE.string <| .title s ), ( "icon", Maybe.withDefault JE.null <| Maybe.map JE.string <| .icon game ), ( "offset", JE.int <| .offset game ) ]
-                categorySpec = JE.object [ ( "name", JE.string <| .subtitle s ), ( "offset", JE.int <| .offset cat ) ]
-                segmentsSpec = JE.list (\seg -> JE.object [ ( "name", JE.string <| .name seg ), ( "icon", Maybe.withDefault JE.null <| Maybe.map JE.string <| .icon seg ) ]) segs
-                newSplitsSpec = JE.object [ ( "title", JE.string <| .title s ), ( "subtitle", JE.string <| .subtitle s ), ( "game", gameSpec ), ( "category", categorySpec ), ( "segments", segmentsSpec ) ]
-                json = JE.object [ ( "tag", JE.string "NewSplits" ), ( "contents", newSplitsSpec ) ]
+            let game  = .game r
+                cat   = .category r
+                game_ = { game | name = .title s }
+                cat_  = { cat | name = .subtitle s }
+                run   = { r | game = game_, category = cat_ }
+                gameJ = gameJSON game_
+                catJ  = categoryJSON cat_
+                segs  = segmentsJSON <| List.map .segment <| .upcoming <| .splits r
+                json  = JE.object [ ( "tag", JE.string "NewSplits" )
+                                  , ( "contents", JE.object [ ( "title", JE.string <| .title s )
+                                                            , ( "subtitle", JE.string <| .subtitle s )
+                                                            , ( "game", gameJ ), ( "category", catJ )
+                                                            , ( "segments", segs )
+                                                            ]
+                                    )
+                                  ]
+            in send ms <| json
+        Timer.MultiCategory rs ->
+            let categoryIDs = JE.list (JE.int << (Maybe.withDefault 0) << .entityID << .category) <| .upcoming rs
+                json = JE.object [ ( "tag", JE.string "NewMultiCategorySplits" )
+                                 , ( "contents", JE.object [ ( "title", JE.string <| .title s )
+                                                           , ( "categoryList", categoryIDs )
+                                                           ]
+                                   )
+                                 ]
             in send ms json
-        Timer.MultiCategory rs -> send ms JE.null
+
+gameJSON : Timer.Game -> JE.Value
+gameJSON game = JE.object [ ( "name", JE.string <| .name game ), ( "icon", Maybe.withDefault JE.null <| Maybe.map JE.string <| .icon game ), ( "offset", JE.int <| .offset game ) ]
+
+categoryJSON : Timer.Category -> JE.Value
+categoryJSON cat = JE.object [ ( "name", JE.string <| .name cat ), ( "offset", JE.int <| .offset cat ) ]
+
+segmentsJSON : List Timer.Segment -> JE.Value
+segmentsJSON = JE.list (\seg -> JE.object [ ( "name", JE.string <| .name seg ), ( "icon", Maybe.withDefault JE.null <| Maybe.map JE.string <| .icon seg ) ])
 
 newClientJSON : JE.Value
 newClientJSON = JE.object [ ( "tag", JE.string "NewClient" )
@@ -437,6 +529,14 @@ splitsLoadRequestJSON category = JE.object [ ( "tag", JE.string "Menu" )
                                                                      ]
                                              )
                                            ]
+
+multiCategoryLoadRequest : Int -> JE.Value
+multiCategoryLoadRequest category = JE.object [ ( "tag", JE.string "Menu" )
+                                              , ( "contents", JE.object [ ( "tag", JE.string "MenuLoadMultiCategory" )
+                                                                        , ( "contents", JE.int category )
+                                                                        ]
+                                                )
+                                              ]
 
 startSplitsRequestJSON : Maybe Int -> JE.Value
 startSplitsRequestJSON time = case time of
@@ -483,6 +583,11 @@ categoryListRequestJSON game = JE.object [ ( "tag", JE.string "Menu" )
                                            )
                                          ]
 
+fullCategoryListRequestJSON : JE.Value
+fullCategoryListRequestJSON = JE.object [ ( "tag", JE.string "Menu" )
+                                        , ( "contents", JE.object [ ( "tag", JE.string "MenuFullCategories") ] )
+                                        ]
+
 finishSplitsRequestJSON : Timer.Timer -> JE.Value
 finishSplitsRequestJSON t = JE.object [ ( "tag", JE.string "TimerControl" )
                                       , ( "contents", JE.object [ ( "tag", JE.string "RemoteFinish" )
@@ -509,8 +614,9 @@ processData model data =
 --        Ok (TimeSync response)        -> ( processTimeSync model response, Cmd.none )
         Ok (SplitsControl ctl)        -> processSplitsControl model ctl
         Ok (UnloadSplits)             -> ( { model | timer = Timer.empty }, Cmd.none )
-        Ok (FetchedGameList games)    -> ( { model | gameList = games }, Cmd.none )
+        Ok (FetchedGameList games)    -> ( { model | gameList = .gameList games, multiCategoryList = .multiCategoryList games }, Cmd.none )
         Ok (FetchedCategoryList cats) -> ( { model | categoryList = cats }, Cmd.none )
+        Ok (FullCategoryList runs)    -> ( { model | fullCategoryList = runs }, Cmd.none )
         Ok (FetchedSplits s)          -> ( { model | timer = Timer.load s }, Cmd.none )
         Ok (ConfigStoreSet k v)       -> ( { model | configStore = Dict.insert k v (.configStore model) }, broadcastIntent (.socket model) (LoadSplits (String.toInt v) ) )
         _                             -> ( model, Cmd.none )
@@ -529,7 +635,9 @@ processIncomingEvent =
                                , splitsControlDecoder
                                , gameListDecoder
                                , categoryListDecoder
+                               , fullCategoryListDecoder
                                , splitsSpecDecoder
+                               , multiCategoryDecoder
                                , closeSplitsDecoder
                                , splitsControlDecoder
                                , configStoreDecoder
@@ -540,12 +648,17 @@ closeSplitsDecoder = checkTag "CloseSplits" <| JD.map (\_ -> UnloadSplits) ( JD.
 
 gameListDecoder : JD.Decoder WebsocketMessage
 gameListDecoder =
-    checkTag "GameList" <| JD.map FetchedGameList
-        ( JD.at [ "data", "contents" ] <| JD.list
+    checkTag "GameList" <| JD.map FetchedGameList <| JD.map2 FullGameList
+        ( JD.at [ "data", "contents", "gamesList" ] <| JD.list
             ( JD.map4 Timer.Game ( JD.at [ "gameID" ] <| JD.maybe JD.int )
                                  ( JD.at [ "gameData", "gameName" ] JD.string )
                                  ( JD.at [ "gameData", "gameIcon" ] <| JD.maybe JD.string )
                                  ( JD.at [ "gameData", "gameDefaultOffset" ] JD.int )
+            )
+        )
+        ( JD.at [ "data", "contents", "multiCategoriesList" ] <| JD.list
+            ( JD.map2 MultiCategoryInfo ( JD.at [ "multiCategoryName" ] JD.string )
+                                        ( JD.at [ "multiCategoryID" ] JD.int )
             )
         )
 
@@ -559,6 +672,11 @@ categoryListDecoder =
             )
         )
 
+fullCategoryListDecoder : JD.Decoder WebsocketMessage
+fullCategoryListDecoder =
+    checkTag "FullCategoryList" <| JD.map FullCategoryList
+        ( JD.at [ "data", "contents" ] <| JD.list runSpecDecoder )
+
 configStoreDecoder : JD.Decoder WebsocketMessage
 configStoreDecoder =
     checkTag "ConfigStore" <| JD.map2 ConfigStoreSet ( JD.at [ "data", "contents" ] <| JD.index 0 JD.string )
@@ -571,12 +689,28 @@ splitsSpecDecoder =
                                  ( JD.at [ "data", "contents", "splitSetCategoryData", "categoryName" ] JD.string )
                                  ( JD.at [ "data", "contents" ] runSpecDecoder )
 
--- TODO: Implement multi-category
+multiCategoryDecoder : JD.Decoder WebsocketMessage
+multiCategoryDecoder =
+    checkTag "MultiCategoryRefresh" <| JD.map FetchedSplits <|
+        JD.map2 (\t cs -> Timer.SplitsSpec t "" cs) ( JD.at [ "data", "contents", "multiCategoryTitle" ] JD.string )
+                                                    ( JD.at [ "data", "contents" ] runSpecDecoder )
+
 runSpecDecoder : JD.Decoder Timer.RunSpec
-runSpecDecoder = JD.map Timer.SingleCategorySpec <|
+runSpecDecoder = JD.oneOf [ singleCategorySpecDecoder, multiCategorySpecDecoder ]
+
+singleCategorySpecDecoder : JD.Decoder Timer.RunSpec
+singleCategorySpecDecoder = JD.map Timer.SingleCategorySpec singleCategorySpecDecoder_
+
+singleCategorySpecDecoder_ : JD.Decoder Timer.Run
+singleCategorySpecDecoder_ =
     JD.map3 (Timer.Run Nothing Nothing) gameDecoder
                                         categoryDecoder
                                         ( JD.at [ "splitSetSegments" ] splitSetDecoder )
+
+multiCategorySpecDecoder : JD.Decoder Timer.RunSpec
+multiCategorySpecDecoder =
+    JD.map2 Timer.MultiCategorySpec (JD.at [ "multiCategoryID" ] <| JD.int)
+                                    (JD.at [ "multiCategoryGames" ] <| JD.list singleCategorySpecDecoder_)
 
 gameDecoder : JD.Decoder Timer.Game
 gameDecoder = JD.map4 Timer.Game ( JD.at [ "splitSetGameID" ] <| JD.maybe JD.int )
@@ -683,8 +817,21 @@ showD showSign classes d =
                                           , Html.span [ HA.classList [("time-millis", True)] ] [ Html.text <| String.padLeft 2 '0' <| String.fromInt <| (.millis d) // 10 ]
                                           ]
 
-mainTimer : Timer.Timer -> Html Msg
-mainTimer timer =
+categoryTimer : Timer.Timer -> Html Msg
+categoryTimer timer =
+    let splits = Timer.splitsFor <| timer
+        currentTime_ = .currentTime splits
+        currentTime = T.posixToMillis currentTime_
+        runStarted  = T.posixToMillis <| Maybe.withDefault currentTime_ <| Maybe.withDefault Nothing <| Maybe.map .runStarted <| Timer.runFor timer
+        diffTime = case timer of
+                       Timer.Finished _ -> case Timer.runFor timer of
+                                               Nothing -> -1 * (currentTime - runStarted) -- Required to make the function total; should be unreachable
+                                               Just r  -> (T.posixToMillis <| Maybe.withDefault currentTime_ <| .runEnded r) - runStarted
+                       _ -> currentTime - runStarted
+    in Html.div [ HA.id "main-timer", HA.classList <| timeStatus timer ] [ showD False [] (unitize diffTime) ]
+
+allCategoriesTimer : Timer.Timer -> Html Msg
+allCategoriesTimer timer =
     let splits = Timer.splitsFor <| timer
         currentTime_ = .currentTime splits
         currentTime = T.posixToMillis currentTime_
@@ -742,7 +889,7 @@ timerViewNormal max timer =
                  [ Html.div [ HA.id "timer-title" ] [ Html.text <| .title splits ]
                  , Html.div [ HA.id "timer-subtitle" ] [ Html.text <| .subtitle splits ]
                  , splitsList max splits
-                 , mainTimer timer
+                 , categoryTimer timer
                  ]
 
 splitHeaders : List (Html Msg)
@@ -779,12 +926,12 @@ splitsList max splits =
             Timer.SingleCategory r -> Html.div [ HA.id "splits-container" ] <| splitHeaders ++ (splitsList_ max <| Timer.aggregateRun currentTime r)
             Timer.MultiCategory rs ->
                 let current = case .current rs of
-                                  Nothing -> []
                                   Just r  -> [r]
+                                  Nothing -> case .upcoming rs of
+                                          (r :: _) -> [r]
+                                          [] -> List.drop ((List.length (.previous rs)) - 1) (.previous rs)
                 in Html.div [ HA.id "splits-container" ] <| splitHeaders -- TODO: This needs a specialized view
-                    ++ (List.concatMap (splitsList_ max) <| List.map (Timer.aggregateRun currentTime) <| .previous rs)
                     ++ (List.concatMap (splitsList_ max) <| List.map (Timer.aggregateRun currentTime) current)
-                    ++ (List.concatMap (splitsList_ max) <| List.map (Timer.aggregateRun currentTime) <| .upcoming rs)
 
 splitsList_ : Int -> Timer.TimingData -> List (Html Msg)
 splitsList_ max timing =
@@ -856,24 +1003,33 @@ splitSegment showSign tags i =
            Nothing -> Html.div [ HA.classList (tags_ ++ [("split-column", True), ("segment-time", True)]) ] [ Html.span [] [ Html.span [ HA.class "time-separator" ] [ Html.text "-" ] ] ]
            Just t  -> Html.div [ HA.classList (tags_ ++ [("split-column", True), ("segment-time", True)]) ] [ showD showSign [] <| unitize t ]
 
-timerViewEdit : Timer.Timer -> Html Msg
-timerViewEdit timer =
-    let splits = Timer.splitsFor timer in
-        Html.div [ HA.id "timer-container" ]
-                 [ Html.div [ HA.id "timer-title" ] [ Html.input [ HA.type_ "text", HA.placeholder "Title", HA.value <| .title splits, HE.onInput UpdateTitle ] [] ]
-                 , Html.div [ HA.id "timer-subtitle" ] [ Html.input [ HA.type_ "text", HA.placeholder "Category", HA.value <| .subtitle splits, HE.onInput UpdateSubtitle ] [] ]
-                 , splitsEdit splits
-                 , Html.div [ HA.id "timer-edit-add" ] [ Html.span [ HE.onClick AddSegment ] [ Html.text "Add Segment" ] ]
-                 , Html.div [ HA.id "timer-edit-options" ] [ Html.span [ HE.onClick EditSplitsCancel] [ Html.text "[ Cancel ]" ]
-                                                           , Html.span [ HE.onClick EditSplitsSave ] [ Html.text "[ Save ]" ]
-                                                           ]
-                 ]
+timerViewEdit : List Timer.RunSpec -> Bool -> Timer.Timer -> Html Msg
+timerViewEdit categories multicategory timer =
+    let splits = Timer.splitsFor timer
+        header = if multicategory then [ Html.div [ HA.id "timer-multicategory" ] [ Html.input [ HA.type_ "checkbox", HA.checked multicategory, HE.onClick <| UpdateMultiCategory False ] [] ]
+                                       , Html.div [ HA.id "timer-title" ] [ Html.input [ HA.type_ "text", HA.placeholder "Title", HA.value <| .title splits, HE.onInput UpdateTitle ] [] ]
+                                       ]
+                                  else [ Html.div [ HA.id "timer-multicategory" ] [ Html.input [ HA.type_ "checkbox", HA.checked multicategory, HE.onClick <| UpdateMultiCategory True ] [] ]
+                                       , Html.div [ HA.id "timer-title" ] [ Html.input [ HA.type_ "text", HA.placeholder "Title", HA.value <| .title splits, HE.onInput UpdateTitle ] [] ]
+                                       , Html.div [ HA.id "timer-subtitle" ] [ Html.input [ HA.type_ "text", HA.placeholder "Category", HA.value <| .subtitle splits, HE.onInput UpdateSubtitle ] [] ]
+                                       ]
+        footer = if multicategory then [ Html.div [ HA.id "timer-edit-add" ] [ Html.span [ HE.onClick AddGame ] [ Html.text "Add Category" ] ]
+                                       , Html.div [ HA.id "timer-edit-options" ] [ Html.span [ HE.onClick EditSplitsCancel] [ Html.text "[ Cancel ]" ]
+                                                                                 , Html.span [ HE.onClick EditSplitsSave ] [ Html.text "[ Save ]" ]
+                                                                                 ]
+                                       ]
+                                  else [ Html.div [ HA.id "timer-edit-add" ] [ Html.span [ HE.onClick AddSegment ] [ Html.text "Add Segment" ] ]
+                                       , Html.div [ HA.id "timer-edit-options" ] [ Html.span [ HE.onClick EditSplitsCancel] [ Html.text "[ Cancel ]" ]
+                                                                                 , Html.span [ HE.onClick EditSplitsSave ] [ Html.text "[ Save ]" ]
+                                                                                 ]
+                                       ]
+    in Html.div [ HA.id "timer-container" ] <| header ++ [splitsEdit categories splits] ++ footer
 
-splitsEdit : Timer.Splits -> Html Msg
-splitsEdit splits =
+splitsEdit : List Timer.RunSpec -> Timer.Splits -> Html Msg
+splitsEdit categories splits =
     case .runTracker splits of
         Timer.SingleCategory r -> Html.div [] <| List.foldl splitsEdit_ [] <| List.indexedMap Tuple.pair <| (.upcoming << .splits) r
-        Timer.MultiCategory rs -> Html.div [] [] -- TODO
+        Timer.MultiCategory rs -> Html.div [] <| List.foldl (categoriesEdit categories) [] <| List.indexedMap Tuple.pair (.upcoming rs)
 
 splitsEdit_ : (Int, Timer.Split) -> List (Html Msg) -> List (Html Msg)
 splitsEdit_ (i, s) hs = let name = .name <| .segment s in
@@ -887,10 +1043,29 @@ splitsEdit_ (i, s) hs = let name = .name <| .segment s in
                         ]
          ]
 
+categoriesEdit : List Timer.RunSpec -> (Int, Timer.Run) -> List (Html Msg) -> List (Html Msg)
+categoriesEdit categories (i, r) hs =
+    let name = (.name <| .game r) ++ " - " ++ (.name <| .category r)
+    in hs ++ [ Html.div [] [ Html.div [ HA.class "split-name" ] [ Html.select [ HE.onInput (UpdateSelectedGame i) ]
+                                                                              ( List.map (categoriesOptions (.entityID <| .category r)) categories )
+                                                                ]
+                           ]
+             ]
+
+categoriesOptions : Maybe Int -> Timer.RunSpec -> Html Msg
+categoriesOptions active rs =
+    case rs of
+        Timer.MultiCategorySpec _ _ -> Html.option [] [ Html.text "Error: Multi-category run" ]
+        Timer.SingleCategorySpec r ->
+            let cid = case (.entityID <| .category r) of
+                          Just i -> [ HA.value <| String.fromInt i, HA.selected (active == (.entityID <| .category r)) ]
+                          Nothing -> []
+            in Html.option cid [ Html.text <| (.name <| .game r) ++ " - " ++ (.name <| .category r) ]
+
 timerView : Model -> Html Msg
 timerView model = case .splitsMode model of
     NormalSplitsView -> timerViewNormal (.maxSegmentsShown model) (.timer model)
-    EditSplitsView -> timerViewEdit <| .timer model
+    EditSplitsView -> timerViewEdit (.fullCategoryList model) (.editMulticategory model) (.timer model)
 
 menuView : Model -> List (Html Msg)
 menuView model = case .menu model of
@@ -934,7 +1109,10 @@ menuView_ model nav = case nav of
                 , Html.div [ HA.class "menu-button", HE.onClick CloseSplits ] [ Html.text "Close Splits" ]
                 , Html.div [ HA.class "menu-button", HE.onClick InputConfig ] [ Html.text "Edit Bindings" ]
                 ]
-    GameList -> List.map (\g -> Html.div [ HA.class "menu-button", HE.onClick (ListCategories <| .entityID g)] [ Html.text <| .name g ]) (.gameList model)
+    GameList ->
+        (List.map (\g -> Html.div [ HA.class "menu-button", HE.onClick (ListCategories <| .entityID g)] [ Html.text <| .name g ]) (.gameList model))
+        ++ [ Html.div [] [ Html.text "---" ] ]
+        ++ (List.map (\c -> Html.div [ HA.class "menu-button", HE.onClick (LoadMultiCategory <| .entityID c)] [ Html.text <| .name c ]) (.multiCategoryList model))
     CategoryList -> List.map (\c -> Html.div [ HA.class "menu-button", HE.onClick (LoadSplits <| .entityID c)] [ Html.text <| .name c ]) (.categoryList model)
     Config -> case .gamepadState model of
         Uninitialized -> [ Html.div [ ] [ Html.text "Awaiting Gamepad input" ] ]

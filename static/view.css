@@ -8,7 +8,8 @@ div#app-top { display: flex; flex-grow: 1; }
 div#timer-top { display: flex; flex-grow: 1; }
 
 /* Contains the full timer */
-div#timer-container { display: flex; flex-direction: column; flex-grow: 1; }
+div.timer-container { display: flex; flex-direction: column; flex-grow: 1; transition: visibility 0s 0.2s, opacity 0.2s linear; }
+div.timer-container.hidden { opacity: 0; }
 
 /* Game title */
 div#timer-title
@@ -99,13 +100,17 @@ span.time-minutes-nolead { display: none; }
 span.time-seconds-nolead { display: none; }
 div.segment span.time-hours.time-empty                      { display: none; }
 div.segment span.time-hours-separator.time-empty            { display: none; }
-div.segment.previous span.time-minutes.time-empty           { display: none; }
-div.segment.previous span.time-minutes-separator.time-empty { display: none; }
-div.segment.previous span.time-minutes                      { display: none; }
-div.segment.previous span.time-minutes-nolead               { display: initial; }
-div.segment.previous span.time-minutes-nolead.time-empty    { display: none; }
-div.segment.previous span.time-minutes.time-empty ~ span.time-seconds { display: none; }
-div.segment.previous span.time-minutes.time-empty ~ span.time-seconds-nolead { display: initial; }
+
+div.segment span.time-minutes.time-empty           { display: none; }
+div.segment span.time-minutes-separator.time-empty { display: none; }
+div.segment span.time-minutes                      { display: none; }
+
+div.segment span.time-hours.time-empty       ~ span.time-minutes                           { display: none; }
+div.segment span.time-hours.time-empty       ~ span.time-minutes-nolead:not(.time-empty)   { display: initial; }
+div.segment span.time-hours:not(.time-empty) ~ span.time-minutes                           { display: initial; }
+
+div.segment span.time-minutes.time-empty     ~ span.time-seconds          { display: none; }
+div.segment span.time-minutes.time-empty     ~ span.time-seconds-nolead   { display: initial; }
 
 div.segment.upcoming>div.pb                   { display: flex; width: 33%; order: 2; }
 div.segment.upcoming>div.gold                 { display: flex; width: 33%; order: 1; }

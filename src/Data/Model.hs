@@ -40,10 +40,19 @@ Category
     offset Int
     deriving Show Generic
 
+MultiCategory
+    name Text
+    deriving Show Generic
+
 Segment
     category CategoryId
     name     Text
     icon     Text Maybe
+    deriving Show Generic
+
+MultiCategoryEntry
+    parent MultiCategoryId
+    category CategoryId
     deriving Show Generic
 
 Attempt
@@ -54,6 +63,16 @@ Attempt
     endSynced   Bool
     realTime    Int
     completed   Bool
+    deriving Show Generic
+
+MultiCategoryAttempt
+    multicategory MultiCategoryId
+    startTime     UTCTime
+    startSynced   Bool
+    endTime       UTCTime
+    endSynced     Bool
+    realTime      Int
+    completed     Bool
     deriving Show Generic
 
 Split

@@ -24,6 +24,13 @@ type alias Displayable = { hours   : Int
                          , sign    : String
                          }
 
+type MultiCategoryDisplay = CurrentCategoryView Int
+                          | CurrentCategoryViewFade Int
+                          | CurrentCategoryViewTransition Int
+                          | AllRunsView Int
+                          | AllRunsViewFade Int
+                          | AllRunsViewTransition Int
+
 type Msg = OpenSocket String
          | SendSocket JE.Value
          | SocketOpened WS.Socket
@@ -55,12 +62,13 @@ type SplitsMessage = RemoteStartSplit Int
                    | RemoteStop
                    | RemoteReset
 
-type alias Model = { socket           : Maybe WS.Socket
-                   , timer            : Timer.Timer
-                   , gameList         : List Timer.Game
-                   , categoryList     : List Timer.Category
-                   , configStore      : ConfigStore
-                   , maxSegmentsShown : Int
+type alias Model = { socket               : Maybe WS.Socket
+                   , timer                : Timer.Timer
+                   , gameList             : List Timer.Game
+                   , categoryList         : List Timer.Category
+                   , configStore          : ConfigStore
+                   , maxSegmentsShown     : Int
+                   , multiCategoryDisplay : MultiCategoryDisplay
                    }
 
 main = Browser.element
@@ -77,6 +85,7 @@ init url = ( { socket = Nothing
              , categoryList = []
              , configStore = Dict.empty
              , maxSegmentsShown = 10
+             , multiCategoryDisplay = CurrentCategoryView 0
              }
            , WS.open url
            )
@@ -102,7 +111,7 @@ update msg model =
             processData model data
         {- Timer functions -}
         Tick t ->
-            ({ model | timer = Timer.setTime (.timer model) t }, Cmd.none)
+            (updateMultiCategoryView { model | timer = Timer.setTime (.timer model) t }, Cmd.none)
         StartSplit _ ->
             timerControl model msg
         Reset _ ->
@@ -124,7 +133,7 @@ timerControl model msg =
         StartSplit t ->
             let offsetTime = Maybe.map (\time -> T.millisToPosix <| (T.posixToMillis time) - (Maybe.withDefault 0 (Maybe.map T.posixToMillis <| .runStarted <| Timer.splitsFor <| .timer model))) t
             in case .timer model of
-                   Timer.Running _  -> ({ model | timer = Timer.split t <| .timer model }, Cmd.none)
+                   Timer.Running _  -> (forceCurrentCategoryView { model | timer = Timer.split t <| .timer model }, Cmd.none)
                    Timer.Finished _ -> ({ model | timer = Timer.reset <| .timer model }, Cmd.none)
                    _                -> ({ model | timer = Timer.start t <| .timer model }, Cmd.none)
         Reset _ ->
@@ -134,6 +143,48 @@ timerControl model msg =
         Skip ->
             ({ model | timer = Timer.skip <| .timer model }, Cmd.none)
         _ -> (model, Cmd.none)
+
+forceCurrentCategoryView : Model -> Model
+forceCurrentCategoryView model =
+    case .timer model of
+        Timer.Running _ ->
+            let currentTime     = T.posixToMillis <| .currentTime <| Timer.splitsFor <| .timer model
+            in case .multiCategoryDisplay model of
+                CurrentCategoryViewFade t -> { model | multiCategoryDisplay = AllRunsViewFade t }
+                CurrentCategoryViewTransition t -> { model | multiCategoryDisplay = AllRunsViewTransition t }
+                AllRunsView _ -> { model | multiCategoryDisplay = AllRunsViewFade currentTime }
+                _ -> model
+        _ -> model
+
+updateMultiCategoryView : Model -> Model
+updateMultiCategoryView model =
+    let secondsSplits   = 300* 1000 -- 5 minutes
+        secondsAllRuns  = 30 * 1000
+        secondsFade     = 220 -- Just over what's needed (allow 0.2s animation to play fully)
+        secondsPostFade = 33  -- Prevents hitching
+        timer           = .timer model
+        currentTime     = T.posixToMillis <| .currentTime <| Timer.splitsFor timer
+    in case timer of
+           Timer.Running _ -> case .multiCategoryDisplay model of
+               CurrentCategoryView t -> if currentTime > (t + secondsSplits)
+                                        then { model | multiCategoryDisplay = CurrentCategoryViewFade currentTime }
+                                        else model
+               CurrentCategoryViewFade t -> if currentTime > (t + secondsFade)
+                                            then { model | multiCategoryDisplay = CurrentCategoryViewTransition currentTime }
+                                            else model
+               CurrentCategoryViewTransition t -> if currentTime > (t + secondsPostFade)
+                                                  then { model | multiCategoryDisplay = AllRunsView currentTime }
+                                                  else model
+               AllRunsView t -> if currentTime > (t + secondsAllRuns)
+                                then { model | multiCategoryDisplay = AllRunsViewFade currentTime }
+                                else model
+               AllRunsViewFade t -> if currentTime > (t + secondsFade)
+                                    then { model | multiCategoryDisplay = AllRunsViewTransition currentTime }
+                                    else model
+               AllRunsViewTransition t -> if currentTime > (t + secondsPostFade)
+                                          then { model | multiCategoryDisplay = CurrentCategoryView currentTime }
+                                          else model
+           _ -> { model | multiCategoryDisplay = AllRunsView 0 }
 
 -- OUTBOUND COMMUNICATION
 
@@ -189,6 +240,7 @@ processIncomingEvent =
                                , gameListDecoder
                                , categoryListDecoder
                                , splitsSpecDecoder
+                               , multiCategoryDecoder
                                , closeSplitsDecoder
                                , splitsControlDecoder
                                , configStoreDecoder
@@ -230,12 +282,28 @@ splitsSpecDecoder =
                                  ( JD.at [ "data", "contents", "splitSetCategoryData", "categoryName" ] JD.string )
                                  ( JD.at [ "data", "contents" ] runSpecDecoder )
 
--- TODO: Implement multi-category
+multiCategoryDecoder : JD.Decoder WebsocketMessage
+multiCategoryDecoder =
+    checkTag "MultiCategoryRefresh" <| JD.map FetchedSplits <|
+        JD.map2 (\t cs -> Timer.SplitsSpec t "" cs) ( JD.at [ "data", "contents", "multiCategoryTitle" ] JD.string )
+                                                    ( JD.at [ "data", "contents" ] runSpecDecoder )
+
 runSpecDecoder : JD.Decoder Timer.RunSpec
-runSpecDecoder = JD.map Timer.SingleCategorySpec <|
+runSpecDecoder = JD.oneOf [ singleCategorySpecDecoder, multiCategorySpecDecoder ]
+
+singleCategorySpecDecoder : JD.Decoder Timer.RunSpec
+singleCategorySpecDecoder = JD.map Timer.SingleCategorySpec singleCategorySpecDecoder_
+
+singleCategorySpecDecoder_ : JD.Decoder Timer.Run
+singleCategorySpecDecoder_ =
     JD.map3 (Timer.Run Nothing Nothing) gameDecoder
                                         categoryDecoder
                                         ( JD.at [ "splitSetSegments" ] splitSetDecoder )
+
+multiCategorySpecDecoder : JD.Decoder Timer.RunSpec
+multiCategorySpecDecoder =
+    JD.map2 Timer.MultiCategorySpec (JD.at [ "multiCategoryID" ] <| JD.int)
+                                    (JD.at [ "multiCategoryGames" ] <| JD.list singleCategorySpecDecoder_)
 
 gameDecoder : JD.Decoder Timer.Game
 gameDecoder = JD.map4 Timer.Game ( JD.at [ "splitSetGameID" ] <| JD.maybe JD.int )
@@ -332,17 +400,29 @@ showD showSign classes d =
                                           , Html.span [ HA.classList [("time-millis", True)] ] [ Html.text <| String.padLeft 2 '0' <| String.fromInt <| (.millis d) // 10 ]
                                           ]
 
-mainTimer : Timer.Timer -> Html Msg
-mainTimer timer =
+categoryTimer : Timer.Timer -> Html Msg
+categoryTimer timer =
     let splits = Timer.splitsFor <| timer
         currentTime_ = .currentTime splits
         currentTime = T.posixToMillis currentTime_
-        runStarted  = T.posixToMillis <| Maybe.withDefault currentTime_ (.runStarted splits)
+        runStarted  = T.posixToMillis <| Maybe.withDefault currentTime_ <| Maybe.withDefault Nothing <| Maybe.map .runStarted <| Timer.runFor timer
         diffTime = case timer of
                        Timer.Finished _ -> case Timer.runFor timer of
                                                Nothing -> -1 * (currentTime - runStarted) -- Required to make the function total; should be unreachable
                                                Just r  -> (T.posixToMillis <| Maybe.withDefault currentTime_ <| .runEnded r) - runStarted
                        _ -> currentTime - runStarted
+    in Html.div [ HA.id "main-timer", HA.classList <| timeStatus timer ] [ showD False [] (unitize diffTime) ]
+
+allCategoriesTimer : Timer.Timer -> Html Msg
+allCategoriesTimer timer =
+    let splits = Timer.splitsFor <| timer
+        currentTime_ = case timer of
+                           Timer.Finished _ -> Maybe.withDefault (.currentTime splits) (.runEnded splits)
+                           _ -> .currentTime splits
+        currentTime = T.posixToMillis currentTime_
+        runStarted  = T.posixToMillis <| Maybe.withDefault currentTime_ (.runStarted splits)
+        runEnded    = T.posixToMillis <| Maybe.withDefault currentTime_ (.runEnded splits)
+        diffTime = currentTime - runStarted
     in Html.div [ HA.id "main-timer", HA.classList <| timeStatus timer ] [ showD False [] (unitize diffTime) ]
 
 timeStatus : Timer.Timer -> List (String, Bool)
@@ -384,14 +464,39 @@ currentSum_ split (sum, _) =
         single = Maybe.map (\x -> x - next) <| .pb <| .segment split
     in (next, single)
 
-timerViewNormal : Int -> Timer.Timer -> Html Msg
-timerViewNormal max timer =
-    let splits = Timer.splitsFor timer in
-        Html.div [ HA.id "timer-container" ]
-                 [ Html.div [ HA.id "timer-title" ] [ Html.text <| .title splits ]
-                 , Html.div [ HA.id "timer-subtitle" ] [ Html.text <| .subtitle splits ]
+timerViewNormal : MultiCategoryDisplay -> Int -> Timer.Timer -> Html Msg
+timerViewNormal mcd max timer =
+    let splits = Timer.splitsFor timer
+        singleView = \b -> singleTimerView b splits max timer
+    in case .runTracker splits of
+           Timer.SingleCategory _ -> singleView True
+           Timer.MultiCategory rs ->
+               let multiView = \b -> allCategoriesTimerView b splits max timer
+               in case (Maybe.map .runStarted <| .current rs) of
+                      Just (Just _) -> case mcd of
+                          CurrentCategoryView _ -> singleView True
+                          CurrentCategoryViewFade _ -> singleView False
+                          CurrentCategoryViewTransition _ -> multiView False
+                          AllRunsView _ -> multiView True
+                          AllRunsViewFade _ -> multiView False
+                          AllRunsViewTransition _ -> singleView False
+                      _ -> multiView True
+
+singleTimerView : Bool -> Timer.Splits -> Int -> Timer.Timer -> Html Msg
+singleTimerView visible splits max timer =
+        Html.div [ HA.classList [ ("timer-container", True), ("hidden", not visible) ] ]
+                 [ Html.div [ HA.id "timer-title" ] [ Html.text <| Maybe.withDefault (.title splits) <| Maybe.map (.name << .game) <| Timer.runFor timer ]
+                 , Html.div [ HA.id "timer-subtitle" ] [ Html.text <| Maybe.withDefault (.subtitle splits) <| Maybe.map (.name << .category) <| Timer.runFor timer ]
                  , splitsList max splits
-                 , mainTimer timer
+                 , categoryTimer timer
+                 ]
+
+allCategoriesTimerView : Bool -> Timer.Splits -> Int -> Timer.Timer -> Html Msg
+allCategoriesTimerView visible splits max timer =
+        Html.div [ HA.classList [ ("timer-container", True), ("hidden", not visible) ] ]
+                 [ Html.div [ HA.id "timer-title" ] [ Html.text <| .title splits ]
+                 , categoriesList max splits
+                 , allCategoriesTimer timer
                  ]
 
 splitHeaders : List (Html Msg)
@@ -423,17 +528,17 @@ splitHeaders =
 
 splitsList : Int -> Timer.Splits -> Html Msg
 splitsList max splits =
-    let currentTime = T.posixToMillis <| Maybe.withDefault (.currentTime splits) (.runStarted splits)
+    let currentTime = \r -> T.posixToMillis <| Maybe.withDefault (.currentTime splits) r
     in case .runTracker splits of
-            Timer.SingleCategory r -> Html.div [ HA.id "splits-container" ] <| splitHeaders ++ (splitsList_ max <| Timer.aggregateRun currentTime r)
+            Timer.SingleCategory r -> Html.div [ HA.id "splits-container" ] <| splitHeaders ++ (splitsList_ max <| Timer.aggregateRun (currentTime <| .runStarted r) r)
             Timer.MultiCategory rs ->
                 let current = case .current rs of
-                                  Nothing -> []
                                   Just r  -> [r]
-                in Html.div [ HA.id "splits-container" ] <| splitHeaders -- TODO: This needs a specialized view
-                    ++ (List.concatMap (splitsList_ max) <| List.map (Timer.aggregateRun currentTime) <| .previous rs)
-                    ++ (List.concatMap (splitsList_ max) <| List.map (Timer.aggregateRun currentTime) current)
-                    ++ (List.concatMap (splitsList_ max) <| List.map (Timer.aggregateRun currentTime) <| .upcoming rs)
+                                  Nothing -> case .upcoming rs of
+                                          (r :: _) -> [r]
+                                          [] -> List.drop  ((List.length (.previous rs)) - 1) (.previous rs)
+                in Html.div [ HA.id "splits-container" ] <| splitHeaders
+                    ++ (List.concatMap (splitsList_ max) <| List.map (\r -> Timer.aggregateRun (currentTime <| .runStarted r) r) current)
 
 splitsList_ : Int -> Timer.TimingData -> List (Html Msg)
 splitsList_ max timing =
@@ -449,6 +554,20 @@ splitsList_ max timing =
         data = List.map (\x -> (1,x)) <| pre ++ pre1 ++ current ++ upcoming ++ last
         (_, divs) = List.foldl aggregateData (0, []) data
     in divs
+
+categoriesList : Int -> Timer.Splits -> Html Msg
+categoriesList max splits =
+    let currentTime = \r -> T.posixToMillis <| Maybe.withDefault (.currentTime splits) r
+    in case .runTracker splits of
+            -- This codepath should never be reached, but it's required to make the function total.  So may as well maintain this codepath.
+            Timer.SingleCategory r -> Html.div [ HA.id "splits-container" ] <| splitHeaders ++ (splitsList_ max <| Timer.aggregateRun (currentTime <| .runStarted r) r)
+            Timer.MultiCategory rs ->
+                let current = case .current rs of
+                                  Just r  -> [r]
+                                  Nothing -> case .upcoming rs of
+                                          (r :: _) -> [r]
+                                          [] -> List.drop  ((List.length (.previous rs)) - 1) (.previous rs)
+                in Html.div [ HA.id "splits-container" ] <| splitHeaders ++ (splitsList_ max <| Timer.aggregateAllRuns (currentTime <| .runStarted splits) rs)
 
 aggregateData : (Int, (String, Timer.TimingDatum)) -> (Int, List (Html Msg)) -> (Int, List (Html Msg))
 aggregateData (i, (tag, timing)) (j, hs) =
@@ -506,7 +625,7 @@ splitSegment showSign tags i =
            Just t  -> Html.div [ HA.classList (tags_ ++ [("split-column", True), ("segment-time", True)]) ] [ showD showSign [] <| unitize t ]
 
 timerView : Model -> Html Msg
-timerView model = timerViewNormal (.maxSegmentsShown model) (.timer model)
+timerView model = timerViewNormal (.multiCategoryDisplay model) (.maxSegmentsShown model) (.timer model)
 
 view : Model -> Html Msg
 view model =

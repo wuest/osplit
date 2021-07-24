@@ -1,8 +1,8 @@
 module Timer exposing ( Timer(..), RunTracker(..), TimingData, TimingDatum
                       , mapT, mapR
-                      , splitsFor, runFor, aggregateRun
+                      , splitsFor, runFor, aggregateRun, aggregateAllRuns
                       , Game, Category, Run, Splits, SplitSet, Split, Segment, RunSpec(..), SplitsSpec
-                      , empty, emptySegment, emptySplitSet
+                      , empty, emptyMulti, emptySegment, emptySplitSet, noRun, noCategory
                       , start, stop, reset, split, unsplit, skip, setTime
                       , load, toJSON
                       , gameDecoder, categoryDecoder, segmentDecoder, segmentListDecoder, runSpecDecoder
@@ -11,6 +11,8 @@ module Timer exposing ( Timer(..), RunTracker(..), TimingData, TimingDatum
 import Time        as T
 import Json.Encode as JE
 import Json.Decode as JD
+
+-- TODO: Not unsetting endtime when unsplitting.  Probably not the worst problem but still.
 
 type alias Time = T.Posix
 type alias Icon = Maybe String
@@ -61,7 +63,8 @@ type alias Run = { runStarted : Maybe Time
                  , splits     : SplitSet
                  }
 
-type alias RunSet = { previous : List Run
+type alias RunSet = { entityID : Maybe Int
+                    , previous : List Run
                     , current  : Maybe Run
                     , upcoming : List Run
                     }
@@ -78,7 +81,7 @@ type alias Splits = { runStarted  : Maybe Time
                     }
 
 type RunSpec = SingleCategorySpec Run
-             | MultiCategorySpec (List Run)
+             | MultiCategorySpec Int (List Run)
 
 type alias SplitsSpec = { title    : String
                         , subtitle : String
@@ -155,6 +158,9 @@ noRun = { runStarted = Nothing
 noSingleRun : RunTracker
 noSingleRun = SingleCategory noRun
 
+noMultiRun : RunTracker
+noMultiRun = MultiCategory { entityID = Nothing, previous = [], current = Nothing, upcoming = [] }
+
 tfm : Maybe Time -> Time
 tfm = Maybe.withDefault epoch
 
@@ -228,6 +234,41 @@ aggregateRun_ now currentSplit ((sums, last, lastTime), segs) =
         tags = statusTags indiv seg singleTime currentTime
     in ((sums_, nextSegment, nextTime), segs ++ [{segment = indiv, running = sums_, singleTime = singleTime, currentSum = currentTime, timingTags = tags}])
 
+aggregateAllRuns : Int -> RunSet -> TimingData
+aggregateAllRuns now rs =
+    let (t1,previous) = List.foldl runToSplit ((Just 0), []) (.previous rs)
+        (t2,current) = List.foldl runToSplit (t1, []) <| case .current rs of
+                                                             Nothing -> []
+                                                             Just r  -> [r]
+        (_,upcoming) = List.foldl runToSplit (t2, []) (.upcoming rs)
+        zeroSegment = { initSegment | pb = Just 0, gold = Just 0, average = Just 0, worst = Just 0 }
+        ((sums1, pastSegment, _), runningTotalsP) = List.foldl (aggregateRun_ now) ((zeroSegment, initSegment, Just 0), []) previous
+        (currentSegment, runningTotalC_) = List.foldl (aggregateRun_ now) ((sums1, pastSegment, Nothing), []) current
+        (_, runningTotalsU) = List.foldl (aggregateRun_ now) (currentSegment, []) upcoming
+        runningTotalC = case runningTotalC_ of
+                            [] -> Nothing
+                            x :: _ -> Just x
+    in { previous = runningTotalsP, current = runningTotalC, upcoming = runningTotalsU }
+
+sumSegmentTime : List (Maybe Int) -> Maybe Int
+sumSegmentTime times = case List.head (List.drop ((List.length times) - 1) times) of
+    Just (Just _) -> Just <| List.foldl (\e a -> a + (Maybe.withDefault 0 e)) 0 times
+    _ -> Nothing
+
+runToSplit : Run -> (Maybe Int, List Split) -> (Maybe Int, List Split)
+runToSplit r (pbSum, rs) =
+    let zeroSegment = { initSegment | name = (.name <| .game r) ++ " - " ++ (.name <| .category r), pb = Just 0, gold = Just 0, average = Just 0, worst = Just 0 }
+        time = Maybe.map2 (\s e -> T.millisToPosix <| (T.posixToMillis e) - (T.posixToMillis s)) (.runStarted r) (.runEnded r)
+        seg = List.foldl (\s sum -> { sum | pb = .pb s
+                                          , gold = Maybe.map (\g -> (Maybe.withDefault 0 (.gold s)) + g) (.gold sum)
+                                          , average = Maybe.map (\a -> (Maybe.withDefault 0 (.average s)) + a) (.gold sum)
+                                          , worst = Maybe.map (\w -> (Maybe.withDefault 0 (.worst s)) + w) (.worst sum)
+                                    }
+                         ) zeroSegment (List.map .segment <| allSplits (.splits r))
+        pbSum_ = Maybe.map2 (\a b -> a + b) (.pb seg) (pbSum)
+        seg_ = { seg | pb = pbSum_ }
+    in (pbSum_, rs ++ [{ segment = seg_, endTime = .runEnded r, segmentTime = time }])
+
 statusTags : Segment -> Segment -> Maybe Int -> Maybe Int -> List (String, Bool)
 statusTags indiv running singleTime currentTime =
     case singleTime of
@@ -253,6 +294,9 @@ statusTags indiv running singleTime currentTime =
 empty : Timer
 empty = Stopped empty_
 
+emptyMulti : Timer
+emptyMulti = Stopped { empty_ | runTracker = noMultiRun }
+
 empty_ : Splits
 empty_ = { runStarted   = Nothing
          , runEnded     = Nothing
@@ -270,8 +314,8 @@ load newSplits = Stopped { empty_ | title = .title newSplits
 
 loadRun : RunSpec -> RunTracker
 loadRun runSpec = case runSpec of
-    SingleCategorySpec segments -> SingleCategory <| loadSegments segments
-    MultiCategorySpec  segments -> MultiCategory { previous = [], current = Nothing, upcoming = (List.map loadSegments segments) }
+    SingleCategorySpec segments     -> SingleCategory <| loadSegments segments
+    MultiCategorySpec  eid segments -> MultiCategory { entityID = Just eid, previous = [], current = Nothing, upcoming = (List.map loadSegments segments) }
 
 loadSegments : Run -> Run
 loadSegments run =
@@ -290,47 +334,51 @@ start : Maybe Time -> Timer -> Timer
 start time t =
     let currentTime = Just <| Maybe.withDefault (.currentTime <| splitsFor t) time
     in case t of
-           Stopped s -> split currentTime <| Running { s | runStarted = Just <| .currentTime s }
+           Stopped s ->
+               case .runTracker s of
+                   SingleCategory _ -> split currentTime <| Running { s | runStarted = Just <| .currentTime s }
+                   MultiCategory rs ->
+                       let newr = MultiCategory { rs | current = List.head (.upcoming rs), upcoming = List.drop 1 (.upcoming rs) }
+                       in split currentTime <| Running { s | runStarted = Just <| .currentTime s, runTracker = newr }
            Paused  s -> Running s
            _         -> t
 
 split : Maybe Time -> Timer -> Timer
 split time t =
-    let currentTime = Maybe.withDefault (.currentTime <| splitsFor t) time
-    in case t of
-        Running splits ->
-            case (.runTracker splits) of
-                SingleCategory _ ->
-                    let newt = ((mapT << mapR << split_) currentTime) t
-                    in case runFor newt of
-                        Nothing -> newt -- This is required to make this function total but should be unreachable
-                        Just r -> case (.current <| .splits r) of
-                            Nothing -> let news = splitsFor newt in Finished { news | runEnded = Just <| .currentTime news }
-                            Just _  -> newt
-                MultiCategory rs ->
-                    let newt = ((mapT << mapR << split_) currentTime) t
-                        news = splitsFor newt
-                    in case (.current rs) of
-                        Nothing -> newt -- This is required to make this function total but should never be reached
-                        Just r -> case (.current <| .splits r) of
-                            Just _  -> newt
-                            Nothing -> case (List.head <| .upcoming rs) of
-                                Nothing ->
-                                    let newRT = case (.runTracker news) of
-                                                    MultiCategory nrs -> MultiCategory { nrs | previous = (.previous nrs) ++ [r]
-                                                                                       , current  = Nothing
-                                                                                       }
-                                                    other -> other
-                                    in Finished { news | runTracker = newRT }
-                                next ->
-                                    let newRT = case (.runTracker news) of
-                                                    MultiCategory nrs -> MultiCategory { nrs | previous = (.previous nrs) ++ [r]
-                                                                                       , current  = next
-                                                                                       , upcoming = List.drop 1 (.upcoming nrs)
-                                                                                       }
-                                                    other -> other
-                                    in Running { news | runTracker = newRT }
-        _ -> t
+    let currentTime = Maybe.withDefault (.currentTime <| splitsFor t) time in
+        case t of
+            Running splits ->
+                case .runTracker splits of
+                    SingleCategory _ ->
+                        let newt = splitRun currentTime t
+                        in case runFor newt of
+                            Nothing -> newt -- This is required to make this function total but should be unreachable
+                            Just r -> case (.current <| .splits r) of
+                                Nothing -> let news = splitsFor newt in Finished { news | runEnded = Just <| .currentTime news }
+                                Just _  -> newt
+                    MultiCategory rs ->
+                        case .current rs of
+                            Just _ ->
+                                let newt = splitRun currentTime t
+                                in case (runFor newt) of
+                                    Nothing -> newt -- This is required to make this function total but is impossible to reach
+                                    Just r  -> case (.current <| .splits r) of
+                                        Nothing ->
+                                            let news  = splitsFor newt
+                                                newr  = { r | runEnded = Just <| .currentTime news }
+                                                newrt = { rs | previous = (.previous rs) ++ [newr], current = List.head (.upcoming rs), upcoming = List.drop 1 (.upcoming rs) }
+                                            in case .current newrt of
+                                                   Nothing -> Finished { news | runTracker = MultiCategory newrt, runEnded = Just <| .currentTime news }
+                                                   Just _  -> Running { news | runTracker = MultiCategory newrt }
+                                        Just _ -> newt
+                            Nothing ->
+                                case List.head (.upcoming rs) of
+                                    Nothing -> Finished splits -- This is required to make this function total but should not be reached normally
+                                    r -> Running { splits | runTracker = MultiCategory { rs | current = r, upcoming = List.drop 1 (.upcoming rs) } }
+            _ -> t
+
+splitRun : Time -> Timer -> Timer
+splitRun = (mapT << mapR << split_)
 
 split_ : Time -> Run -> Run
 split_ t run =
@@ -433,7 +481,7 @@ resetRun : Run -> Run
 resetRun run = { run | splits = resetSplitSet <| .splits run }
 
 resetRuns : RunSet -> RunSet
-resetRuns runs = { previous = [], current = Nothing, upcoming = List.map resetRun <| allRuns runs }
+resetRuns runs = { entityID = .entityID runs, previous = [], current = Nothing, upcoming = List.map resetRun <| allRuns runs }
 
 resetSplitSet : SplitSet -> SplitSet
 resetSplitSet set = { previous = [], current = Nothing, upcoming = List.map resetSplit <| allSplits set }
@@ -451,15 +499,26 @@ allSplits set = case .current set of
     Nothing -> List.append (.previous set) (.upcoming set)
     Just s  -> List.concat [(.previous set), [s], (.upcoming set)]
 
+-- TODO: Add parentCategory
 toJSON : Timer -> JE.Value
-toJSON timer = case (.runTracker << splitsFor) timer of
-    SingleCategory run -> runToJSON run -- TODO add rest of Splits object context
-    MultiCategory runs -> runsToJSON runs
+toJSON timer = let splits = splitsFor timer in
+    case .runTracker splits of
+        SingleCategory run -> runToJSON run
+        MultiCategory runs ->
+            let parentID = .entityID runs
+            in JE.object [ ("tag", JE.string "MultiSet")
+                         , ( "parentCategory", JE.int <| Maybe.withDefault -1 parentID )
+                         , ( "startTime", JE.int <| T.posixToMillis <| Maybe.withDefault epoch <| .runStarted splits )
+                         , ( "endTime", JE.int <| T.posixToMillis <| Maybe.withDefault epoch <| .runEnded splits )
+                         , ( "realTime", JE.int <| Maybe.withDefault 0 <| Maybe.map2 (\t1 t2 -> (T.posixToMillis t1) - (T.posixToMillis t2)) (.runEnded splits) (.runStarted splits) )
+                         , ( "runs", JE.list (tupleJSON JE.bool runToJSON) <|
+                                             (List.map (\r -> (True, r)) <| .previous runs)
+                                             ++ (Maybe.withDefault [] <| Maybe.map (\r -> [(False, r)]) <| .current runs)
+                           )
+                         ]
 
-runsToJSON : RunSet -> JE.Value
-runsToJSON runs = JE.object [ ( "tag", JE.string "MultiCategoryRuns")
-                            , ( "runs", JE.list runToJSON <| allRuns runs )
-                            ]
+tupleJSON : (a -> JE.Value) -> (b -> JE.Value) -> (a, b) -> JE.Value
+tupleJSON e1 e2 (v1, v2) = JE.list identity [ e1 v1, e2 v2 ]
 
 runToJSON : Run -> JE.Value
 runToJSON run =
@@ -468,7 +527,8 @@ runToJSON run =
                        Just c  -> JE.int c
         segments = List.filter (\x -> ((.entityID <| .segment x) /= Nothing) && ((.segmentTime x) /= Nothing) ) (allSplits <| .splits run)
     in
-        JE.object [ ( "runCategory", category )
+        JE.object [ ( "tag", JE.string "SingleRun" )
+                  , ( "runCategory", category )
                   , ( "segments", JE.list (segmentsJSON (T.posixToMillis <| Maybe.withDefault epoch <| .runStarted run)) segments )
                   , ( "startTime", JE.int <| T.posixToMillis <| Maybe.withDefault epoch <| .runStarted run )
                   , ( "endTime", JE.int <| T.posixToMillis <| Maybe.withDefault epoch <| .runEnded run )
@@ -546,4 +606,5 @@ singleRunSpecDecoder =
 multiRunSpecDecoder : JD.Decoder RunSpec
 multiRunSpecDecoder =
     checkTag_ ( JD.at [ "tag" ] JD.string) "MultiCategorySpec" <|
-        JD.map MultiCategorySpec <| JD.at [ "runSpecData" ] <| JD.list runDecoder
+        JD.map2 MultiCategorySpec (JD.at [ "parentCategory" ] JD.int)
+                                  (JD.at [ "runSpecData" ] <| JD.list runDecoder)

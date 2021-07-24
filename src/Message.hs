@@ -33,7 +33,9 @@ data SplitsCommand = RemoteStartSplit Int
 
 data MenuCommand = MenuGames
                  | MenuCategories Int
+                 | MenuFullCategories
                  | MenuLoadSplits Int
+                 | MenuLoadMultiCategory Int
                  | MenuCloseSplits
     deriving ( Show, Generic )
 
@@ -42,15 +44,22 @@ data Command = TimeSyncInit TimeState
              | TimerControl SplitsCommand
              | Menu MenuCommand
              | NewSplits NewSplitsSpec
+             | NewMultiCategorySplits NewMultiCategorySpec
              | SetConfig ConfigKey ConfigVal
              | FetchConfig ConfigKey
     deriving ( Show, Generic )
 
-data SplitSet = SplitSet { runCategory :: Int
-                         , segments    :: [SegmentTime]
-                         , startTime   :: Int
-                         , endTime     :: Int
-                         , realTime    :: Int
+data SplitSet = SingleRun { runCategory :: Int
+                          , segments    :: [SegmentTime]
+                          , startTime   :: Int
+                          , endTime     :: Int
+                          , realTime    :: Int
+                          }
+              | MultiSet { parentCategory :: Int
+                         , runs           :: [(Bool, SplitSet)]
+                         , startTime      :: Int
+                         , endTime        :: Int
+                         , realTime       :: Int
                          } deriving ( Show, Generic )
 
 data SegmentTime = SegmentTime { segment :: Int
@@ -61,18 +70,28 @@ data Game = Game { gameID   :: Int
                  , gameData :: Model.Game
                  } deriving ( Show, Generic )
 
+data MultiCategory = MultiCategory { multiCategoryID   :: Int
+                                   , multiCategoryName :: Text.Text
+                                   } deriving ( Show, Generic )
+
 data Category = Category { categoryID   :: Int
                          , categoryData :: Model.Category
                          } deriving ( Show, Generic )
+
+data TopList = TopList { gamesList           :: [Game]
+                       , multiCategoriesList :: [MultiCategory]
+                       } deriving ( Show, Generic )
 
 data Response = Raw { respType :: Text.Text
                     , respData :: Text.Text
                     }
               | TimeSyncResponse TimeState
               | RemoteControl SplitsCommand
-              | GameList [Game]
+              | GameList TopList
               | CategoryList [Category]
               | SplitsRefresh (Maybe LoadedSplits)
+              | MultiCategoryRefresh LoadedMultiCategory
+              | FullCategoryList [LoadedSplits]
               | CloseSplits
               | ConfigStore ConfigKey ConfigVal
               deriving ( Show, Generic )
@@ -93,6 +112,11 @@ data LoadedSplits = LoadedSplits { splitSetGameID :: Int
                                  , splitSetSegments :: [SegmentData]
                                  } deriving ( Show, Generic )
 
+data LoadedMultiCategory = LoadedMultiCategory { multiCategoryID    :: Integer
+                                               , multiCategoryTitle :: Text.Text
+                                               , multiCategoryGames :: [LoadedSplits]
+                                               } deriving ( Show, Generic )
+
 instance JSON.FromJSON SplitsCommand
 instance JSON.ToJSON SplitsCommand
 instance JSON.FromJSON MenuCommand
@@ -108,6 +132,10 @@ instance JSON.FromJSON Category
 instance JSON.ToJSON Category
 instance JSON.FromJSON Game
 instance JSON.ToJSON Game
+instance JSON.FromJSON MultiCategory
+instance JSON.ToJSON MultiCategory
+instance JSON.FromJSON TopList
+instance JSON.ToJSON TopList
 instance JSON.FromJSON SplitSet
 instance JSON.ToJSON SplitSet
 instance JSON.FromJSON SegmentData
@@ -156,6 +184,10 @@ data NewSplitsSpec = NewSplitsSpec { title :: Text.Text
                                    , segments :: [SegmentSpec]
                                    } deriving ( Show, Generic )
 
+data NewMultiCategorySpec = NewMultiCategorySpec { title :: Text.Text
+                                                 , categoryList :: [Integer]
+                                                 } deriving ( Show, Generic )
+
 instance FromJSON NewSplitsSpec where
     parseJSON = withObject "NewSplitsSpec" $ \o -> do
         title <- o .: "title"
@@ -169,3 +201,6 @@ instance JSON.ToJSON GameSpec
 instance JSON.ToJSON CategorySpec
 instance JSON.ToJSON SegmentSpec
 instance JSON.ToJSON NewSplitsSpec
+instance JSON.ToJSON NewMultiCategorySpec
+instance JSON.ToJSON LoadedMultiCategory
+instance JSON.FromJSON NewMultiCategorySpec
