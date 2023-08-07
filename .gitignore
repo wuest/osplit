@@ -1,5 +1,3 @@
 .ghc.environment*
 dist-newstyle/
-static/main.js
-static/view.js
 elm-stuff
