@@ -69,7 +69,10 @@ export default function(app)
   // load : () -> Cmd a
   ElmGamepad.load = function(_)
   {
-    app.ports.onLoad.send(localStorage[ElmGamepad.key]);
+    if(localStorage.length > 0 && localStorage[ElmGamepad.key] != undefined)
+    {
+      app.ports.onLoad.send(localStorage[ElmGamepad.key]);
+    }
   }
 
   app.ports.loadMappings.subscribe(ElmGamepad.load);
